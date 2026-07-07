@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# secrets & local config
+.env
+config/settings.yaml
+*.session
+*.session-journal
+
+# runtime data
+data/
+*.db
+*.log

@@ -1,0 +1,62 @@
+# Copy this file to config/settings.yaml and adjust to your needs.
+# This file controls trading behaviour; secrets (API keys) stay in .env.
+
+position_sizing:
+  # One of: fixed_usdt | percent_balance | signal
+  #   fixed_usdt      -> always use `fixed_usdt.amount` USDT notional per trade
+  #   percent_balance -> use `percent_balance.percent` % of available futures balance
+  #   signal          -> use the size the signal itself specifies (falls back to
+  #                      `fallback_mode` below when the signal has no size)
+  mode: fixed_usdt
+  fixed_usdt:
+    amount: 100          # USDT notional per trade
+  percent_balance:
+    percent: 5           # % of available balance per trade
+  # Used only when mode == signal and the signal has no explicit size
+  fallback_mode: fixed_usdt
+
+leverage:
+  # Used when a signal does not specify a leverage
+  default: 10
+  # Hard cap - a signal asking for more than this is clamped down to it
+  max: 20
+
+risk:
+  # Reject signals for symbols not in this list. Leave empty to allow all symbols.
+  symbol_whitelist: []
+  # Reject signals for symbols in this list even if whitelist is empty (allow-all)
+  symbol_blacklist: []
+  # Maximum number of concurrent open positions across all symbols
+  max_open_positions: 5
+  # Maximum number of open positions for the *same* symbol at once
+  max_positions_per_symbol: 1
+  # Stop opening new positions once today's realized loss exceeds this many USDT
+  max_daily_loss_usdt: 200
+  # Minimum seconds between two orders for the same symbol (basic anti-spam/anti-duplicate)
+  min_seconds_between_same_symbol: 30
+  # Ignore signals older than this many seconds (based on Telegram message timestamp)
+  max_signal_age_seconds: 90
+
+orders:
+  # Order type used to enter a position: market | limit
+  entry_order_type: market
+  # If entry_order_type == limit and the signal gives an entry range, use this edge:
+  # best (most likely to fill fast) | worst (more conservative)
+  limit_price_selection: best
+  # Attach exchange-side stop-loss / take-profit orders when the signal provides them
+  attach_stop_loss: true
+  attach_take_profit: true
+  # When a signal lists multiple take-profit targets, split the position evenly across them
+  split_position_across_take_profits: true
+
+telegram:
+  # Only act on messages from these chats; edits to existing messages are also
+  # parsed by default since signal groups often edit SL/TP after posting.
+  react_to_edits: true
+
+parser:
+  # Extra keyword synonyms, merged with the built-in ones in src/signal_parser.py.
+  # Handy when a channel uses unusual wording without touching code.
+  extra_long_keywords: []
+  extra_short_keywords: []
+  extra_close_keywords: []
