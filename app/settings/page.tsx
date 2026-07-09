@@ -1,0 +1,337 @@
+"use client";
+
+import { useCallback, useEffect, useState } from "react";
+import { apiFetch, getStoredPassword, storePassword } from "../client";
+
+export default function SettingsPage() {
+  const [password, setPassword] = useState("");
+  const [authed, setAuthed] = useState(false);
+  const [error, setError] = useState("");
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  // form state
+  const [botToken, setBotToken] = useState("");
+  const [allowedChats, setAllowedChats] = useState("");
+  const [reactToEdits, setReactToEdits] = useState(true);
+  const [apiKey, setApiKey] = useState("");
+  const [apiSecret, setApiSecret] = useState("");
+  const [baseUrl, setBaseUrl] = useState("https://api.pionex.com");
+  const [liveTrading, setLiveTrading] = useState(false);
+  const [sizingMode, setSizingMode] = useState("fixed_usdt");
+  const [fixedUsdt, setFixedUsdt] = useState(100);
+  const [percentBalance, setPercentBalance] = useState(5);
+  const [addPositionUsdt, setAddPositionUsdt] = useState(0);
+  const [levDefault, setLevDefault] = useState(10);
+  const [levMax, setLevMax] = useState(20);
+  const [whitelist, setWhitelist] = useState("");
+  const [blacklist, setBlacklist] = useState("");
+  const [maxOpenPositions, setMaxOpenPositions] = useState(5);
+  const [maxAdds, setMaxAdds] = useState(2);
+  const [cooldown, setCooldown] = useState(30);
+  const [maxAge, setMaxAge] = useState(120);
+  const [entryType, setEntryType] = useState("market");
+  const [attachSl, setAttachSl] = useState(true);
+  const [attachTp, setAttachTp] = useState(true);
+  const [trailEnabled, setTrailEnabled] = useState(false);
+  const [trailActivate, setTrailActivate] = useState(2);
+  const [trailCallback, setTrailCallback] = useState(1);
+  const [ignoreKeywords, setIgnoreKeywords] = useState("");
+
+  const load = useCallback(async () => {
+    const { status, body } = await apiFetch("/api/settings");
+    if (status !== 200) {
+      setAuthed(false);
+      setError(body?.error ?? `HTTP ${status}`);
+      return;
+    }
+    setAuthed(true);
+    setError("");
+    const s = body.settings;
+    setBotToken(s.telegram.botToken ?? "");
+    setAllowedChats((s.telegram.allowedChats ?? []).join(", "));
+    setReactToEdits(!!s.telegram.reactToEdits);
+    setApiKey(s.pionex.apiKey ?? "");
+    setApiSecret(s.pionex.apiSecret ?? "");
+    setBaseUrl(s.pionex.baseUrl ?? "https://api.pionex.com");
+    setLiveTrading(!!s.trading.liveTrading);
+    setSizingMode(s.trading.sizing.mode);
+    setFixedUsdt(s.trading.sizing.fixedUsdt);
+    setPercentBalance(s.trading.sizing.percentBalance);
+    setAddPositionUsdt(s.trading.addPositionUsdt ?? 0);
+    setLevDefault(s.trading.leverage.default);
+    setLevMax(s.trading.leverage.max);
+    setWhitelist((s.trading.risk.symbolWhitelist ?? []).join(", "));
+    setBlacklist((s.trading.risk.symbolBlacklist ?? []).join(", "));
+    setMaxOpenPositions(s.trading.risk.maxOpenPositions);
+    setMaxAdds(s.trading.risk.maxAddsPerPosition);
+    setCooldown(s.trading.risk.cooldownSeconds);
+    setMaxAge(s.trading.risk.maxSignalAgeSeconds);
+    setEntryType(s.trading.orders.entryType);
+    setAttachSl(!!s.trading.orders.attachStopLoss);
+    setAttachTp(!!s.trading.orders.attachTakeProfit);
+    setTrailEnabled(!!s.trading.trailing.enabled);
+    setTrailActivate(s.trading.trailing.activateProfitPercent);
+    setTrailCallback(s.trading.trailing.callbackPercent);
+    setIgnoreKeywords((s.filters.ignoreKeywords ?? []).join(", "));
+  }, []);
+
+  useEffect(() => {
+    if (getStoredPassword()) load();
+  }, [load]);
+
+  const splitList = (v: string) =>
+    v.split(/[,\n]/).map((x) => x.trim()).filter(Boolean);
+
+  async function save() {
+    setSaving(true);
+    setMsg(null);
+    const { status, body } = await apiFetch("/api/settings", {
+      method: "POST",
+      body: JSON.stringify({
+        telegram: {
+          botToken,
+          allowedChats: splitList(allowedChats),
+          reactToEdits,
+        },
+        pionex: { apiKey, apiSecret, baseUrl },
+        trading: {
+          liveTrading,
+          sizing: {
+            mode: sizingMode,
+            fixedUsdt: Number(fixedUsdt),
+            percentBalance: Number(percentBalance),
+          },
+          addPositionUsdt: Number(addPositionUsdt),
+          leverage: { default: Number(levDefault), max: Number(levMax) },
+          risk: {
+            symbolWhitelist: splitList(whitelist).map((s) => s.toUpperCase()),
+            symbolBlacklist: splitList(blacklist).map((s) => s.toUpperCase()),
+            maxOpenPositions: Number(maxOpenPositions),
+            maxAddsPerPosition: Number(maxAdds),
+            cooldownSeconds: Number(cooldown),
+            maxSignalAgeSeconds: Number(maxAge),
+          },
+          orders: {
+            entryType,
+            attachStopLoss: attachSl,
+            attachTakeProfit: attachTp,
+          },
+          trailing: {
+            enabled: trailEnabled,
+            activateProfitPercent: Number(trailActivate),
+            callbackPercent: Number(trailCallback),
+          },
+        },
+        filters: { ignoreKeywords: splitList(ignoreKeywords) },
+      }),
+    });
+    setSaving(false);
+    if (status === 200) {
+      setMsg({ ok: true, text: "已儲存 ✅" + (body.durableStore ? "" : "（注意：未連接 KV，serverless 上不會保存）") });
+      load();
+    } else {
+      setMsg({ ok: false, text: body?.error ?? `儲存失敗 (HTTP ${status})` });
+    }
+  }
+
+  async function registerWebhook() {
+    setMsg(null);
+    const { status, body } = await apiFetch("/api/setup-webhook", { method: "POST" });
+    if (status === 200) {
+      setMsg({ ok: true, text: `Webhook 已註冊：${body.webhookUrl}` });
+    } else {
+      setMsg({ ok: false, text: body?.error ?? `註冊失敗 (HTTP ${status})` });
+    }
+  }
+
+  if (!authed) {
+    return (
+      <div className="panel" style={{ maxWidth: 420, margin: "48px auto" }}>
+        <h1>管理登入</h1>
+        <label>管理密碼 (ADMIN_PASSWORD)</label>
+        <input
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") { storePassword(password); load(); }
+          }}
+        />
+        <button onClick={() => { storePassword(password); load(); }}>登入</button>
+        {error && <div className="msg err">{error}</div>}
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <h1>設定</h1>
+
+      <div className="panel">
+        <h2 style={{ marginTop: 0 }}>Telegram 機器人</h2>
+        <p className="hint">
+          用 @BotFather 建立機器人取得 token，把機器人加入信號群組（頻道要設為管理員）。
+          在群組中機器人預設收不到所有訊息，請對 BotFather 用 /setprivacy 設為 Disabled。
+        </p>
+        <label>Bot Token</label>
+        <input type="text" value={botToken} onChange={(e) => setBotToken(e.target.value)}
+               placeholder="123456:ABC-DEF..." />
+        <label>監聽的群組／頻道（username 或數字 chat id，逗號分隔）</label>
+        <input type="text" value={allowedChats} onChange={(e) => setAllowedChats(e.target.value)}
+               placeholder="mysignalgroup, -1001234567890" />
+        <div className="checkbox">
+          <input type="checkbox" id="edits" checked={reactToEdits}
+                 onChange={(e) => setReactToEdits(e.target.checked)} />
+          <label htmlFor="edits" style={{ margin: 0 }}>訊息被編輯時視為新信號重新解析</label>
+        </div>
+        <button className="secondary" onClick={registerWebhook}>
+          註冊 Telegram Webhook（儲存 token 後按這裡）
+        </button>
+      </div>
+
+      <div className="panel">
+        <h2 style={{ marginTop: 0 }}>Pionex API</h2>
+        <p className="hint">在 Pionex 的 API 管理建立金鑰；只開交易權限，不要開提現。</p>
+        <div className="row">
+          <div>
+            <label>API Key</label>
+            <input type="text" value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
+          </div>
+          <div>
+            <label>API Secret</label>
+            <input type="password" value={apiSecret} onChange={(e) => setApiSecret(e.target.value)} />
+          </div>
+        </div>
+        <label>API Base URL</label>
+        <input type="text" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
+      </div>
+
+      <div className="panel">
+        <h2 style={{ marginTop: 0 }}>交易</h2>
+        <div className="checkbox">
+          <input type="checkbox" id="live" checked={liveTrading}
+                 onChange={(e) => setLiveTrading(e.target.checked)} />
+          <label htmlFor="live" style={{ margin: 0, color: "var(--red)" }}>
+            ⚠️ 啟用真實下單（LIVE）— 未勾選時所有信號只做模擬
+          </label>
+        </div>
+        <div className="row3">
+          <div>
+            <label>部位大小模式</label>
+            <select value={sizingMode} onChange={(e) => setSizingMode(e.target.value)}>
+              <option value="fixed_usdt">固定 USDT</option>
+              <option value="percent_balance">餘額百分比</option>
+              <option value="signal">依信號指定（無則用固定值）</option>
+            </select>
+          </div>
+          <div>
+            <label>固定金額 (USDT)</label>
+            <input type="number" value={fixedUsdt} onChange={(e) => setFixedUsdt(+e.target.value)} />
+          </div>
+          <div>
+            <label>餘額百分比 (%)</label>
+            <input type="number" value={percentBalance} onChange={(e) => setPercentBalance(+e.target.value)} />
+          </div>
+        </div>
+        <div className="row3">
+          <div>
+            <label>加倉金額 (USDT，0 = 同主要設定)</label>
+            <input type="number" value={addPositionUsdt} onChange={(e) => setAddPositionUsdt(+e.target.value)} />
+          </div>
+          <div>
+            <label>預設槓桿</label>
+            <input type="number" value={levDefault} onChange={(e) => setLevDefault(+e.target.value)} />
+          </div>
+          <div>
+            <label>槓桿上限</label>
+            <input type="number" value={levMax} onChange={(e) => setLevMax(+e.target.value)} />
+          </div>
+        </div>
+        <div className="row">
+          <div>
+            <label>進場單類型</label>
+            <select value={entryType} onChange={(e) => setEntryType(e.target.value)}>
+              <option value="market">市價 (market)</option>
+              <option value="limit">限價 (limit，用信號的入場價)</option>
+            </select>
+          </div>
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 16 }}>
+            <div className="checkbox">
+              <input type="checkbox" id="asl" checked={attachSl}
+                     onChange={(e) => setAttachSl(e.target.checked)} />
+              <label htmlFor="asl" style={{ margin: 0 }}>套用信號止損</label>
+            </div>
+            <div className="checkbox">
+              <input type="checkbox" id="atp" checked={attachTp}
+                     onChange={(e) => setAttachTp(e.target.checked)} />
+              <label htmlFor="atp" style={{ margin: 0 }}>套用信號止盈</label>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="panel">
+        <h2 style={{ marginTop: 0 }}>移動止損（trailing stop）</h2>
+        <p className="hint">
+          由監控端點（/api/cron/monitor）每次執行時檢查：獲利達「啟動門檻」後，
+          止損會跟在最新價格後方「回撤距離」處，只上移不下移。
+          需要設定 CRON_SECRET 並以外部排程每分鐘呼叫（Vercel Hobby 方案的內建 Cron 只能每天一次）。
+        </p>
+        <div className="row3">
+          <div className="checkbox" style={{ alignSelf: "end" }}>
+            <input type="checkbox" id="trail" checked={trailEnabled}
+                   onChange={(e) => setTrailEnabled(e.target.checked)} />
+            <label htmlFor="trail" style={{ margin: 0 }}>啟用移動止損</label>
+          </div>
+          <div>
+            <label>啟動門檻（價格獲利 %）</label>
+            <input type="number" step="0.1" value={trailActivate}
+                   onChange={(e) => setTrailActivate(+e.target.value)} />
+          </div>
+          <div>
+            <label>回撤距離 (%)</label>
+            <input type="number" step="0.1" value={trailCallback}
+                   onChange={(e) => setTrailCallback(+e.target.value)} />
+          </div>
+        </div>
+      </div>
+
+      <div className="panel">
+        <h2 style={{ marginTop: 0 }}>風控與過濾</h2>
+        <div className="row">
+          <div>
+            <label>幣種白名單（留空 = 全部允許）</label>
+            <input type="text" value={whitelist} onChange={(e) => setWhitelist(e.target.value)}
+                   placeholder="BTCUSDT, ETHUSDT" />
+          </div>
+          <div>
+            <label>幣種黑名單</label>
+            <input type="text" value={blacklist} onChange={(e) => setBlacklist(e.target.value)} />
+          </div>
+        </div>
+        <div className="row3">
+          <div>
+            <label>最大同時持倉數</label>
+            <input type="number" value={maxOpenPositions} onChange={(e) => setMaxOpenPositions(+e.target.value)} />
+          </div>
+          <div>
+            <label>單一持倉最大加倉次數</label>
+            <input type="number" value={maxAdds} onChange={(e) => setMaxAdds(+e.target.value)} />
+          </div>
+          <div>
+            <label>同幣種冷卻（秒）</label>
+            <input type="number" value={cooldown} onChange={(e) => setCooldown(+e.target.value)} />
+          </div>
+        </div>
+        <label>信號最大時效（秒，過舊的訊息不執行）</label>
+        <input type="number" value={maxAge} onChange={(e) => setMaxAge(+e.target.value)} />
+        <label>忽略關鍵字（訊息含任一關鍵字即過濾，逗號分隔）— 用來擋數據公布、新聞、廣告</label>
+        <textarea value={ignoreKeywords} onChange={(e) => setIgnoreKeywords(e.target.value)} />
+      </div>
+
+      <button onClick={save} disabled={saving}>{saving ? "儲存中..." : "儲存設定"}</button>
+      {msg && <div className={`msg ${msg.ok ? "ok" : "err"}`}>{msg.text}</div>}
+    </div>
+  );
+}

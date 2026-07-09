@@ -3,6 +3,13 @@ __pycache__/
 .venv/
 venv/
 
+# node / next.js
+node_modules/
+.next/
+.vercel/
+next-env.d.ts
+*.tsbuildinfo
+
 # secrets & local config
 .env
 config/settings.yaml

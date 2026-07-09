@@ -1,0 +1,166 @@
+export type SignalAction =
+  | "open"       // 建單 / 開倉
+  | "add"        // 加倉
+  | "close"      // 平倉
+  | "cancel"     // 取消掛單
+  | "update_sl"  // 移動/修改止損
+  | "update_tp"; // 修改止盈
+
+export interface ParsedSignal {
+  action: SignalAction;
+  symbol: string;               // normalized, e.g. "BTCUSDT"
+  side: "long" | "short" | null;
+  leverage: number | null;
+  entryPrice: number | null;
+  entryPriceHigh: number | null;
+  takeProfits: number[];
+  stopLoss: number | null;
+  stopLossBreakeven: boolean;   // "移至保本/成本" style update_sl
+  sizeUsdt: number | null;
+  rawText: string;
+  chatId: string;
+  messageId: number;
+  editedFromId?: number;
+  timestamp: number;            // unix ms
+  warnings: string[];
+}
+
+export interface Position {
+  symbol: string;
+  side: "long" | "short";
+  leverage: number;
+  entryPrice: number;          // average entry
+  qty: number;                 // base asset quantity
+  originalQty: number;
+  sizeUsdt: number;
+  stopLoss: number | null;
+  takeProfits: number[];       // remaining TP targets
+  tpCountOriginal: number;
+  orderIds: string[];          // pending entry order ids (limit entries)
+  openedAt: number;
+  addCount: number;
+  dryRun: boolean;
+}
+
+export interface OrderRecord {
+  at: number;
+  action: SignalAction | "tp_hit" | "sl_hit" | "trailing_move";
+  symbol: string;
+  side: string | null;
+  sizeUsdt: number;
+  qty: number;
+  price: number | null;
+  leverage: number;
+  dryRun: boolean;
+  success: boolean;
+  message: string;
+  orderIds: string[];
+}
+
+export interface SignalRecord {
+  at: number;
+  chatId: string;
+  messageId: number;
+  action: SignalAction | "ignored" | "filtered";
+  symbol: string | null;
+  side: string | null;
+  summary: string;
+  rawText: string;
+}
+
+export interface Settings {
+  telegram: {
+    botToken: string;
+    // chat usernames (without @) or numeric chat ids; empty = reject all
+    allowedChats: string[];
+    webhookSecret: string;
+    reactToEdits: boolean;
+  };
+  pionex: {
+    apiKey: string;
+    apiSecret: string;
+    baseUrl: string;
+  };
+  trading: {
+    liveTrading: boolean;
+    sizing: {
+      mode: "fixed_usdt" | "percent_balance" | "signal";
+      fixedUsdt: number;
+      percentBalance: number;
+    };
+    addPositionUsdt: number; // 加倉每次的名目 USDT，0 = 與主要 sizing 相同
+    leverage: { default: number; max: number };
+    risk: {
+      symbolWhitelist: string[];
+      symbolBlacklist: string[];
+      maxOpenPositions: number;
+      maxAddsPerPosition: number;
+      cooldownSeconds: number;
+      maxSignalAgeSeconds: number;
+    };
+    orders: {
+      entryType: "market" | "limit";
+      attachStopLoss: boolean;
+      attachTakeProfit: boolean;
+    };
+    trailing: {
+      enabled: boolean;
+      activateProfitPercent: number; // 價格獲利 % 達標後啟動
+      callbackPercent: number;       // 回撤 % 觸發（SL 跟在最新價後面這個距離）
+    };
+  };
+  filters: {
+    // 訊息包含任一關鍵字即忽略（過濾數據公布、新聞等）
+    ignoreKeywords: string[];
+    extraLongKeywords: string[];
+    extraShortKeywords: string[];
+  };
+}
+
+export const DEFAULT_SETTINGS: Settings = {
+  telegram: {
+    botToken: "",
+    allowedChats: [],
+    webhookSecret: "",
+    reactToEdits: true,
+  },
+  pionex: {
+    apiKey: "",
+    apiSecret: "",
+    baseUrl: "https://api.pionex.com",
+  },
+  trading: {
+    liveTrading: false,
+    sizing: { mode: "fixed_usdt", fixedUsdt: 100, percentBalance: 5 },
+    addPositionUsdt: 0,
+    leverage: { default: 10, max: 20 },
+    risk: {
+      symbolWhitelist: [],
+      symbolBlacklist: [],
+      maxOpenPositions: 5,
+      maxAddsPerPosition: 2,
+      cooldownSeconds: 30,
+      maxSignalAgeSeconds: 120,
+    },
+    orders: {
+      entryType: "market",
+      attachStopLoss: true,
+      attachTakeProfit: true,
+    },
+    trailing: {
+      enabled: false,
+      activateProfitPercent: 2,
+      callbackPercent: 1,
+    },
+  },
+  filters: {
+    ignoreKeywords: [
+      "数据公布", "數據公布", "经济数据", "經濟數據", "非农", "非農",
+      "CPI", "PPI", "FOMC", "利率决议", "利率決議",
+      "新闻", "新聞", "快讯", "快訊", "空投", "airdrop",
+      "广告", "廣告", "推广", "推廣", "注册链接", "註冊連結",
+    ],
+    extraLongKeywords: [],
+    extraShortKeywords: [],
+  },
+};
