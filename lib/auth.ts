@@ -1,23 +1,44 @@
 import { NextRequest, NextResponse } from "next/server";
+import { createHash } from "node:crypto";
+import { getAdminPasswordHash } from "./store";
 
 /**
- * All management endpoints (settings, state, setup-webhook) require the
- * ADMIN_PASSWORD environment variable to be set on the deployment and sent
- * by the client in the x-admin-password header. Without ADMIN_PASSWORD the
- * endpoints refuse to run so API keys can never be exposed on a fresh,
- * unconfigured deployment.
+ * Admin auth for management endpoints (settings, state, setup-webhook).
+ *
+ * Two sources, env wins:
+ *   1. ADMIN_PASSWORD environment variable (optional)
+ *   2. a password created on first visit via /api/auth, stored (hashed) in KV
+ *
+ * When neither exists the endpoints return 428 so the UI can show the
+ * "create your admin password" flow instead of a login prompt.
  */
-export function requireAdmin(req: NextRequest): NextResponse | null {
-  const expected = process.env.ADMIN_PASSWORD;
-  if (!expected) {
-    return NextResponse.json(
-      { error: "ADMIN_PASSWORD is not configured on the server. Set it in Vercel → Project → Settings → Environment Variables." },
-      { status: 503 }
-    );
-  }
+
+export function hashPassword(pw: string): string {
+  return createHash("sha256").update("tpx-admin:" + pw).digest("hex");
+}
+
+export type AuthMode = "env" | "kv" | "unconfigured";
+
+export async function adminAuthMode(): Promise<AuthMode> {
+  if (process.env.ADMIN_PASSWORD) return "env";
+  if (await getAdminPasswordHash()) return "kv";
+  return "unconfigured";
+}
+
+export async function requireAdmin(req: NextRequest): Promise<NextResponse | null> {
   const got = req.headers.get("x-admin-password") ?? "";
-  if (got !== expected) {
-    return NextResponse.json({ error: "invalid admin password" }, { status: 401 });
+  const envPw = process.env.ADMIN_PASSWORD;
+  if (envPw) {
+    if (got === envPw) return null;
+    return NextResponse.json({ error: "密碼錯誤" }, { status: 401 });
   }
-  return null;
+  const storedHash = await getAdminPasswordHash();
+  if (storedHash) {
+    if (got && hashPassword(got) === storedHash) return null;
+    return NextResponse.json({ error: "密碼錯誤" }, { status: 401 });
+  }
+  return NextResponse.json(
+    { error: "尚未設定管理密碼", needsSetup: true },
+    { status: 428 }
+  );
 }

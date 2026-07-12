@@ -10,23 +10,28 @@
  * automatically, external pingers must be configured to send it.
  */
 import { NextRequest, NextResponse } from "next/server";
+import { requireAdmin } from "@/lib/auth";
 import { monitorTick } from "@/lib/executor";
-import { getSettings } from "@/lib/store";
+import { getOrCreateCronSecret, getSettings } from "@/lib/store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 export async function GET(req: NextRequest) {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) {
-    return NextResponse.json(
-      { error: "CRON_SECRET is not configured" },
-      { status: 503 }
-    );
-  }
-  if (req.headers.get("authorization") !== `Bearer ${secret}`) {
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  // accepted credentials: CRON_SECRET env var, the auto-generated secret
+  // shown on the settings page, or the admin password header (manual tests)
+  const auth = req.headers.get("authorization") ?? "";
+  const envSecret = process.env.CRON_SECRET;
+  const kvSecret = await getOrCreateCronSecret();
+  const bearerOk =
+    (envSecret && auth === `Bearer ${envSecret}`) ||
+    (kvSecret && auth === `Bearer ${kvSecret}`);
+  if (!bearerOk) {
+    const adminDenied = await requireAdmin(req);
+    if (adminDenied) {
+      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    }
   }
 
   const settings = await getSettings();

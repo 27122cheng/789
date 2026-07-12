@@ -21,6 +21,8 @@ const K_SIGNALS = KEY_PREFIX + "signals";
 const K_ORDERS = KEY_PREFIX + "orders";
 const K_COOLDOWN = KEY_PREFIX + "cooldown";
 const K_DEDUP = KEY_PREFIX + "dedup";
+const K_ADMIN_HASH = KEY_PREFIX + "adminPasswordHash";
+const K_CRON_SECRET = KEY_PREFIX + "cronSecret";
 
 const MAX_LOG = 200;
 
@@ -122,6 +124,28 @@ export async function setCooldown(symbol: string, at: number): Promise<void> {
   const map = await getCooldowns();
   map[symbol] = at;
   await kvSet(K_COOLDOWN, map);
+}
+
+// ---------------------------------------------------- auth & cron secrets
+export async function getAdminPasswordHash(): Promise<string | null> {
+  return await kvGet<string>(K_ADMIN_HASH);
+}
+
+export async function setAdminPasswordHash(hash: string): Promise<void> {
+  await kvSet(K_ADMIN_HASH, hash);
+}
+
+/** Auto-generated secret for the monitor endpoint; created on first use so
+ *  the user never has to configure a CRON_SECRET env var by hand. */
+export async function getOrCreateCronSecret(): Promise<string> {
+  const existing = await kvGet<string>(K_CRON_SECRET);
+  if (existing) return existing;
+  const secret = Array.from(
+    { length: 32 },
+    () => "abcdefghijklmnopqrstuvwxyz0123456789"[Math.floor(Math.random() * 36)]
+  ).join("");
+  await kvSet(K_CRON_SECRET, secret);
+  return secret;
 }
 
 /** Returns true if this exact message (chat:msg:digest) was already handled. */

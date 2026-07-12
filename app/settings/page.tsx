@@ -1,11 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { apiFetch, getStoredPassword, storePassword } from "../client";
+import { apiFetch, getStoredPassword } from "../client";
+import LoginPanel from "../LoginPanel";
 
 export default function SettingsPage() {
-  const [password, setPassword] = useState("");
   const [authed, setAuthed] = useState(false);
+  const [monitorInfo, setMonitorInfo] = useState<{ url: string; secret: string } | null>(null);
   const [error, setError] = useState("");
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [saving, setSaving] = useState(false);
@@ -42,11 +43,12 @@ export default function SettingsPage() {
     const { status, body } = await apiFetch("/api/settings");
     if (status !== 200) {
       setAuthed(false);
-      setError(body?.error ?? `HTTP ${status}`);
+      setError(body?.needsSetup ? "" : body?.error ?? `HTTP ${status}`);
       return;
     }
     setAuthed(true);
     setError("");
+    setMonitorInfo(body.monitor ?? null);
     const s = body.settings;
     setBotToken(s.telegram.botToken ?? "");
     setAllowedChats((s.telegram.allowedChats ?? []).join(", "));
@@ -147,19 +149,13 @@ export default function SettingsPage() {
 
   if (!authed) {
     return (
-      <div className="panel" style={{ maxWidth: 420, margin: "48px auto" }}>
-        <h1>管理登入</h1>
-        <label>管理密碼 (ADMIN_PASSWORD)</label>
-        <input
-          type="password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") { storePassword(password); load(); }
-          }}
-        />
-        <button onClick={() => { storePassword(password); load(); }}>登入</button>
-        {error && <div className="msg err">{error}</div>}
+      <div>
+        <LoginPanel onAuthed={load} />
+        {error && (
+          <div className="msg err" style={{ maxWidth: 460, margin: "0 auto" }}>
+            {error}
+          </div>
+        )}
       </div>
     );
   }
@@ -274,10 +270,17 @@ export default function SettingsPage() {
       <div className="panel">
         <h2 style={{ marginTop: 0 }}>移動止損（trailing stop）</h2>
         <p className="hint">
-          由監控端點（/api/cron/monitor）每次執行時檢查：獲利達「啟動門檻」後，
-          止損會跟在最新價格後方「回撤距離」處，只上移不下移。
-          需要設定 CRON_SECRET 並以外部排程每分鐘呼叫（Vercel Hobby 方案的內建 Cron 只能每天一次）。
+          由監控端點每次執行時檢查：獲利達「啟動門檻」後，止損會跟在最新價格後方
+          「回撤距離」處，只上移不下移。信號的止盈止損也由同一個端點監控觸發。
         </p>
+        {monitorInfo && (
+          <div className="banner warn" style={{ wordBreak: "break-all" }}>
+            <b>啟用監控（免費做法）：</b>到 cron-job.org 註冊，建立一個每分鐘執行的排程：
+            <br />網址：<code>{monitorInfo.url}</code>
+            <br />加一個 Header：<code>Authorization</code> ＝{" "}
+            <code>Bearer {monitorInfo.secret}</code>
+          </div>
+        )}
         <div className="row3">
           <div className="checkbox" style={{ alignSelf: "end" }}>
             <input type="checkbox" id="trail" checked={trailEnabled}

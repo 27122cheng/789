@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { apiFetch, getStoredPassword, storePassword } from "./client";
+import { apiFetch, getStoredPassword } from "./client";
+import LoginPanel from "./LoginPanel";
 
 function fmtTime(ms: number): string {
   return new Date(ms).toLocaleString("zh-TW", { hour12: false });
@@ -17,7 +18,6 @@ function SideCell({ side }: { side: string | null }) {
 }
 
 export default function Dashboard() {
-  const [password, setPassword] = useState("");
   const [authed, setAuthed] = useState(false);
   const [error, setError] = useState("");
   const [state, setState] = useState<any>(null);
@@ -30,7 +30,8 @@ export default function Dashboard() {
       setError("");
     } else {
       setAuthed(false);
-      setError(body?.error ?? `HTTP ${status}`);
+      // 428 = first-run, the LoginPanel shows the setup flow itself
+      setError(body?.needsSetup ? "" : body?.error ?? `HTTP ${status}`);
     }
   }, []);
 
@@ -46,32 +47,13 @@ export default function Dashboard() {
 
   if (!authed) {
     return (
-      <div className="panel" style={{ maxWidth: 420, margin: "48px auto" }}>
-        <h1>管理登入</h1>
-        <p className="hint">
-          輸入部署時設定的 ADMIN_PASSWORD 環境變數值。
-        </p>
-        <label>管理密碼</label>
-        <input
-          type="password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              storePassword(password);
-              load();
-            }
-          }}
-        />
-        <button
-          onClick={() => {
-            storePassword(password);
-            load();
-          }}
-        >
-          登入
-        </button>
-        {error && <div className="msg err">{error}</div>}
+      <div>
+        <LoginPanel onAuthed={load} />
+        {error && (
+          <div className="msg err" style={{ maxWidth: 460, margin: "0 auto" }}>
+            {error}
+          </div>
+        )}
       </div>
     );
   }
