@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAdmin } from "@/lib/auth";
+import { adminAuthMode, requireAdmin } from "@/lib/auth";
 import {
   getOrders,
   getPositions,
@@ -23,6 +23,7 @@ export async function GET(req: NextRequest) {
   ]);
 
   return NextResponse.json({
+    authMode: await adminAuthMode(),
     liveTrading:
       settings.trading.liveTrading &&
       !!settings.pionex.apiKey &&

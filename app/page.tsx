@@ -73,6 +73,12 @@ export default function Dashboard() {
           ✅ 模擬模式 (dry-run) — 只解析與記錄，不會真實下單
         </div>
       )}
+      {state.authMode === "default" && (
+        <div className="banner warn">
+          🔑 目前使用預設密碼 123456789。若之後想改密碼，在 Vercel 加上
+          ADMIN_PASSWORD 環境變數即可。
+        </div>
+      )}
       {!state.durableStore && (
         <div className="banner warn">
           ⚠️ 尚未連接 KV 儲存（Upstash Redis）。serverless 環境下設定與倉位

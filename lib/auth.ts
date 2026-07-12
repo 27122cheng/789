@@ -17,12 +17,16 @@ export function hashPassword(pw: string): string {
   return createHash("sha256").update("tpx-admin:" + pw).digest("hex");
 }
 
-export type AuthMode = "env" | "kv" | "unconfigured";
+/** Used when neither ADMIN_PASSWORD env nor a KV-stored password exists.
+ *  Change it by setting the ADMIN_PASSWORD environment variable in Vercel. */
+export const DEFAULT_ADMIN_PASSWORD = "123456789";
+
+export type AuthMode = "env" | "kv" | "default";
 
 export async function adminAuthMode(): Promise<AuthMode> {
   if (process.env.ADMIN_PASSWORD) return "env";
   if (await getAdminPasswordHash()) return "kv";
-  return "unconfigured";
+  return "default";
 }
 
 export async function requireAdmin(req: NextRequest): Promise<NextResponse | null> {
@@ -37,8 +41,6 @@ export async function requireAdmin(req: NextRequest): Promise<NextResponse | nul
     if (got && hashPassword(got) === storedHash) return null;
     return NextResponse.json({ error: "密碼錯誤" }, { status: 401 });
   }
-  return NextResponse.json(
-    { error: "尚未設定管理密碼", needsSetup: true },
-    { status: 428 }
-  );
+  if (got === DEFAULT_ADMIN_PASSWORD) return null;
+  return NextResponse.json({ error: "密碼錯誤" }, { status: 401 });
 }
