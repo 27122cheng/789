@@ -26,11 +26,22 @@ const K_CRON_SECRET = KEY_PREFIX + "cronSecret";
 
 const MAX_LOG = 200;
 
+// Built-in fallback credentials (owner's Upstash database) so the app works
+// without any Vercel environment configuration. Env vars take precedence.
+const FALLBACK_REDIS_URL = "https://probable-platypus-39069.upstash.io";
+const FALLBACK_REDIS_TOKEN =
+  "AZidAAIgcDE3MzQ4Mjg0OTNhYWI0MzI1YjJkYjFmNzVlMzI1ODI3Yg";
+
 function redisFromEnv(): Redis | null {
+  if (process.env.TPX_DISABLE_KV === "1") return null; // tests / local dev
   const url =
-    process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
+    process.env.KV_REST_API_URL ||
+    process.env.UPSTASH_REDIS_REST_URL ||
+    FALLBACK_REDIS_URL;
   const token =
-    process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
+    process.env.KV_REST_API_TOKEN ||
+    process.env.UPSTASH_REDIS_REST_TOKEN ||
+    FALLBACK_REDIS_TOKEN;
   if (url && token) return new Redis({ url, token });
   return null;
 }

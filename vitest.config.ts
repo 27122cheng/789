@@ -5,6 +5,9 @@ export default defineConfig({
   test: {
     include: ["lib/__tests__/**/*.test.ts"],
     environment: "node",
+    env: {
+      TPX_DISABLE_KV: "1", // tests must never touch the real Upstash DB
+    },
   },
   resolve: {
     alias: {
