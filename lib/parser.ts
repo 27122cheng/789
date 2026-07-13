@@ -1,16 +1,22 @@
 /**
  * Signal parser: free-form Telegram text -> ParsedSignal.
  *
- * Supported actions:
- *   open      建單/開倉:  "BTCUSDT LONG 10x Entry: 60000 TP1: 61000 SL: 59000"
- *   add       加倉:       "BTCUSDT 加倉" / "ETHUSDT add position 50 USDT"
- *   close     平倉:       "BTCUSDT 平倉" / "close BTCUSDT"
- *   cancel    取消掛單:   "取消 BTCUSDT 掛單" / "cancel BTCUSDT orders"
- *   update_sl 移動止損:   "BTCUSDT 止損移至 60000" / "BTCUSDT 止損移至保本"
- *   update_tp 修改止盈:   "BTCUSDT 止盈改為 62000 63000"
+ * Tuned for the "加密掃描 Pro" style signal bot plus generic formats:
  *
- * Anything without a recognizable trading pair, or matching one of the
- * configured ignore keywords (news / data releases / ads), returns null.
+ *   open      開倉:  「▲ 做多（Long）：ZEC/USDT … 進場： $533
+ *                     止損： $526.133 (-1.29%) 止盈一： $543.301 …」
+ *                     also generic "BTCUSDT LONG 10x Entry: 60000 SL: 59000"
+ *             長線單 may carry 加倉計劃 levels:「加倉 1： $0.00110614」
+ *   add       加倉:  「BTCUSDT 加倉」 (bare command w/o entry structure)
+ *   close     平倉:  「BTCUSDT 平倉」/「close BTCUSDT」/「已止盈離場」
+ *   cancel    取消:  「🚫 交易建議已取消 … ACH/USDT」
+ *                    「⚡ 未進場已飛越止盈二！… 掛單已自動取消」
+ *   update_sl 移動止損:「建議止損調整 … 新止損： $0.237906」
+ *                    「BTCUSDT 止損移至保本」
+ *   update_tp 修改止盈:「BTCUSDT 止盈改為 62000, 63000」
+ *
+ * Anything without a recognizable trading pair, or matching a configured
+ * ignore keyword (news / data releases / ads), is dropped.
  */
 import { ParsedSignal, SignalAction } from "./types";
 
@@ -26,7 +32,7 @@ const SHORT_KEYWORDS = [
 ];
 const CLOSE_KEYWORDS = [
   "close position", "close", "exit", "平仓", "平倉", "全部平仓", "全部平倉",
-  "平多", "平空", "离场", "離場", "出场", "出場", "止盈离场", "止盈離場",
+  "平多", "平空", "离场", "離場", "出场", "出場",
 ];
 const ADD_KEYWORDS = [
   "add position", "add to position", "dca", "加仓", "加倉", "补仓", "補倉",
@@ -34,9 +40,10 @@ const ADD_KEYWORDS = [
 const CANCEL_KEYWORDS = [
   "cancel order", "cancel orders", "cancel", "取消挂单", "取消掛單",
   "取消订单", "取消訂單", "撤单", "撤單", "取消",
+  "飞越止盈", "飛越止盈",
 ];
 const BREAKEVEN_KEYWORDS = [
-  "breakeven", "break even", "保本", "成本价", "成本價", "入场价", "入場價",
+  "breakeven", "break even", "保本", "成本价", "成本價",
   "开仓价", "開倉價",
 ];
 // verbs that mark an SL/TP *modification* rather than a fresh signal
@@ -46,9 +53,14 @@ const MOVE_VERBS = [
   "更新", "move", "moved", "update", "updated", "raise", "lower", "set to",
   "adjust", "trail",
 ];
+// unmistakable "adjust the stop" phrasing used by signal bots
+const SL_ADJUST_MARKERS =
+  /新止損|新止损|建議止損調整|建议止损调整|追蹤止損|追踪止损|移動止損|移动止损/;
+// messages reporting a finished trade (must not be read as a fresh open)
+const CLOSED_MARKERS =
+  /已平倉|已平仓|已止盈|已止損|已止损|止盈.{0,6}(?:觸及|触及|達成|达成)|(?:觸及|触及|達成|达成).{0,6}止盈|獲利了結|获利了结|獲利離場|获利离场/;
 
 const NUM = /[\d][\d,]*(?:\.\d+)?/;
-const NUM_G = new RegExp(NUM.source, "g");
 
 const SYMBOL_RE = new RegExp(
   `\\b([A-Za-z0-9]{2,15})[\\-/_]?(${QUOTES.join("|")})\\b`
@@ -94,8 +106,7 @@ export function extractSymbol(norm: string): string | null {
     const base = lm[1].toUpperCase();
     if ((QUOTES as readonly string[]).includes(base)) return null;
     for (const q of QUOTES) {
-      if (base.endsWith(q) && base.length > q.length)
-        return base; // already includes quote
+      if (base.endsWith(q) && base.length > q.length) return base;
     }
     return `${base}USDT`;
   }
@@ -109,30 +120,6 @@ export function isFiltered(text: string, ignoreKeywords: string[]): boolean {
   return ignoreKeywords.some(
     (kw) => kw.trim() && lower.includes(kw.trim().toLowerCase())
   );
-}
-
-function classifyAction(lower: string): {
-  action: SignalAction | null;
-  breakeven: boolean;
-} {
-  if (findKeyword(CANCEL_KEYWORDS, lower) >= 0)
-    return { action: "cancel", breakeven: false };
-  if (findKeyword(ADD_KEYWORDS, lower) >= 0)
-    return { action: "add", breakeven: false };
-
-  const mentionsSl = /止损|止損|\bsl\b|stop\s*loss/i.test(lower);
-  const mentionsTp = /止盈|\btp\d*\b|take\s*profit|目标价|目標價/i.test(lower);
-  const hasMoveVerb = findKeyword(MOVE_VERBS, lower) >= 0;
-  if (hasMoveVerb && mentionsSl) {
-    const breakeven = findKeyword(BREAKEVEN_KEYWORDS, lower) >= 0;
-    return { action: "update_sl", breakeven };
-  }
-  if (hasMoveVerb && mentionsTp) return { action: "update_tp", breakeven: false };
-
-  if (findKeyword(CLOSE_KEYWORDS, lower) >= 0)
-    return { action: "close", breakeven: false };
-
-  return { action: "open", breakeven: false };
 }
 
 function extractSide(
@@ -160,7 +147,7 @@ function extractLeverage(norm: string): number | null {
 function extractEntry(norm: string): { low: number | null; high: number | null } {
   const re = new RegExp(
     `(?:entry|入场价|入場價|入场|入場|进场|進場|开仓价|開倉價|开仓|開倉)` +
-      `\\s*[:：]?\\s*(${NUM.source})(?:\\s*(?:-|~|至|to)\\s*(${NUM.source}))?`,
+      `\\s*[:：]?\\s*\\$?(${NUM.source})(?:\\s*(?:-|~|至|to)\\s*\\$?(${NUM.source}))?`,
     "i"
   );
   const m = re.exec(norm);
@@ -170,11 +157,24 @@ function extractEntry(norm: string): { low: number | null; high: number | null }
 
 function extractTakeProfits(norm: string): number[] {
   const values: number[] = [];
-  const re =
-    /(?:tp\d*|take\s*profit\d*|止盈\d*|目标价\d*|目標價\d*|目标\d*|目標\d*)\s*(?:改为|改為|改到|改成|移至|移到|调整至|調整至|更新为|更新為)?\s*[:：]?\s*([\d.,~\-\s]+?)(?=$|\n|[a-zA-Z一-鿿])/gim;
+  // numbered / named single-value labels: 止盈一 / 止盈2 / 最終止盈 / TP1
+  const single = new RegExp(
+    `(?:最終止盈|最终止盈|止盈[一二三四五六七八九\\d]|tp\\s*\\d|take\\s*profit\\s*\\d)` +
+      `\\s*[:：]?\\s*\\$?(${NUM.source})`,
+    "gi"
+  );
   let m: RegExpExecArray | null;
-  while ((m = re.exec(norm)) !== null) {
-    for (const token of m[1].trim().split(/[,、~\-\s]+/)) {
+  while ((m = single.exec(norm)) !== null) {
+    const v = parseNum(m[1]);
+    if (!values.includes(v)) values.push(v);
+  }
+  if (values.length) return values;
+
+  // bare label followed by one or more values: 止盈: 3300, 3400
+  const multi =
+    /(?:tp|take\s*profit|止盈|目标价|目標價|目标|目標)\s*(?:改为|改為|改到|改成|移至|移到|調整至|调整至|更新为|更新為)?\s*[:：]?\s*\$?([\d.,~\-\s]+?)(?=$|\n|[a-zA-Z一-鿿(（])/gim;
+  while ((m = multi.exec(norm)) !== null) {
+    for (const token of m[1].trim().split(/[,~\-\s]+/)) {
       if (!token) continue;
       const v = parseFloat(token);
       if (!isNaN(v) && !values.includes(v)) values.push(v);
@@ -184,16 +184,22 @@ function extractTakeProfits(norm: string): number[] {
 }
 
 function extractStopLoss(norm: string, allowLoose: boolean): number | null {
-  // strict: number immediately after the label ("SL: 59000" / "止損 59000")
+  // explicit "new stop" label wins: 新止損： $0.237906
   let m = new RegExp(
-    `(?:\\bsl\\b|stop\\s*loss|止损|止損)\\s*[:：]?\\s*(${NUM.source})`,
+    `(?:新止損|新止损)\\s*[:：]?\\s*\\$?(${NUM.source})`,
+    "i"
+  ).exec(norm);
+  if (m) return parseNum(m[1]);
+  // strict: number right after the label ("SL: 59000" / "止損： $526.133")
+  m = new RegExp(
+    `(?:\\bsl\\b|stop\\s*loss|止损|止損)\\s*[:：]?\\s*\\$?(${NUM.source})`,
     "i"
   ).exec(norm);
   if (m) return parseNum(m[1]);
   if (allowLoose) {
-    // update-style: "止損移至 60000" - a move verb sits between label & number
+    // update-style: "止損移至 60000" - a verb sits between label and number
     m = new RegExp(
-      `(?:\\bsl\\b|stop\\s*loss|止损|止損)[^\\d\\n]{0,16}(${NUM.source})`,
+      `(?:\\bsl\\b|stop\\s*loss|止损|止損)[^\\d\\n]{0,16}\\$?(${NUM.source})`,
       "i"
     ).exec(norm);
     if (m) return parseNum(m[1]);
@@ -210,6 +216,20 @@ function extractSize(norm: string): number | null {
   return null;
 }
 
+/** 加倉計劃 price levels:「加倉 1： $0.00110614」/「加仓2: 0.00103314」.
+ *  The numeric index + colon are required so a bare "加倉" command or a
+ *  "加倉計劃（2 次）" heading never produces a bogus level. */
+function extractAddLevels(norm: string): number[] {
+  const out: number[] = [];
+  const re = new RegExp(`加[倉仓]\\s*\\d\\s*[:：]\\s*\\$?(${NUM.source})`, "g");
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(norm)) !== null) {
+    const v = parseNum(m[1]);
+    if (!out.includes(v)) out.push(v);
+  }
+  return out;
+}
+
 export function parseSignal(
   text: string,
   meta: { chatId: string; messageId: number; timestamp: number },
@@ -221,14 +241,48 @@ export function parseSignal(
   const lower = norm.toLowerCase();
 
   const symbol = extractSymbol(norm);
-  if (!symbol) return null; // not a trade signal (chatter, news without pair)
+  if (!symbol) return null; // not a trade signal (chatter / news without pair)
 
-  const { action, breakeven } = classifyAction(lower);
-  if (!action) return null;
-
+  const entry = extractEntry(norm);
+  const takeProfits = extractTakeProfits(norm);
+  const strictSl = extractStopLoss(norm, false);
   const warnings: string[] = [];
+
+  // ------------------------------------------------ action classification
+  let action: SignalAction;
+  let breakeven = false;
+  const mentionsSl = /止损|止損|\bsl\b|stop\s*loss/i.test(norm);
+  const mentionsTp = /止盈|\btp\d*\b|take\s*profit|目标价|目標價/i.test(norm);
+  const hasMoveVerb = findKeyword(MOVE_VERBS, lower) >= 0;
+
+  if (findKeyword(CANCEL_KEYWORDS, lower) >= 0) {
+    action = "cancel";
+  } else if (SL_ADJUST_MARKERS.test(norm)) {
+    action = "update_sl";
+  } else if (CLOSED_MARKERS.test(norm)) {
+    action = "close";
+  } else if (entry.low !== null && (strictSl !== null || takeProfits.length > 0)) {
+    // full signal structure (entry + SL/TP) -> a fresh open, even if the
+    // message also mentions 加倉計劃 levels or trailing-stop advice text
+    action = "open";
+  } else if (findKeyword(ADD_KEYWORDS, lower) >= 0) {
+    action = "add";
+  } else if (hasMoveVerb && mentionsSl) {
+    action = "update_sl";
+  } else if (hasMoveVerb && mentionsTp) {
+    action = "update_tp";
+  } else if (findKeyword(CLOSE_KEYWORDS, lower) >= 0) {
+    action = "close";
+  } else {
+    action = "open";
+  }
+
+  if (action === "update_sl") {
+    breakeven = findKeyword(BREAKEVEN_KEYWORDS, lower) >= 0;
+  }
+
   let side: "long" | "short" | null = null;
-  if (action === "open" || action === "add") {
+  if (action === "open" || action === "add" || action === "cancel") {
     side = extractSide(
       lower,
       options.extraLongKeywords ?? [],
@@ -239,8 +293,8 @@ export function parseSignal(
     }
   }
 
-  const entry = extractEntry(norm);
-  const isUpdate = action === "update_sl" || action === "update_tp";
+  const stopLoss =
+    action === "update_sl" ? extractStopLoss(norm, true) : strictSl;
 
   return {
     action,
@@ -249,10 +303,11 @@ export function parseSignal(
     leverage: extractLeverage(norm),
     entryPrice: entry.low,
     entryPriceHigh: entry.high,
-    takeProfits: extractTakeProfits(norm),
-    stopLoss: extractStopLoss(norm, isUpdate),
+    takeProfits,
+    stopLoss,
     stopLossBreakeven: breakeven,
     sizeUsdt: extractSize(norm),
+    addLevels: action === "open" ? extractAddLevels(norm) : [],
     rawText: text,
     chatId: meta.chatId,
     messageId: meta.messageId,

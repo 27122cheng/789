@@ -139,6 +139,11 @@ function riskReject(
     if (positions[sym]) return `position already open for ${sym}`;
     if (Object.keys(positions).length >= risk.maxOpenPositions)
       return `max open positions reached (${risk.maxOpenPositions})`;
+    if (
+      risk.requireEntryAndSl &&
+      (signal.entryPrice === null || signal.stopLoss === null)
+    )
+      return "open signal has no entry price or stop loss (requireEntryAndSl)";
   }
   if (signal.action === "add") {
     const pos = positions[sym];
@@ -313,6 +318,7 @@ export async function executeSignal(
           client, live, sym, signal.side, sizeUsdt,
           limitPrice ? entryType : "market", limitPrice, refPrice
         );
+        const maxAdds = settings.trading.risk.maxAddsPerPosition;
         positions[sym] = {
           symbol: sym,
           side: signal.side,
@@ -327,6 +333,9 @@ export async function executeSignal(
                 signal.side === "long" ? a - b : b - a)
             : [],
           tpCountOriginal: signal.takeProfits.length,
+          pendingAdds: signal.addLevels.slice(0, maxAdds),
+          entryOrderType: limitPrice ? entryType : "market",
+          beMoved: false,
           orderIds: res.orderIds,
           openedAt: Date.now(),
           addCount: 0,
@@ -380,12 +389,26 @@ export async function executeSignal(
       case "cancel": {
         let n = 0;
         if (live) n = await client.cancelAllOrders(toPerpSymbol(sym));
-        if (pos && pos.orderIds.length) pos.orderIds = [];
+        let note = live
+          ? `cancelled ${n} open order(s)`
+          : "dry-run: pending orders cancelled";
+        if (pos) {
+          if (pos.entryOrderType === "limit") {
+            // pending limit entry -> the trade idea is void, drop the tracker
+            delete positions[sym];
+            note += "; pending limit entry removed from tracker";
+          } else {
+            // market entry already filled -> cancelling the idea means exiting
+            const ids = await closeQty(client, live, pos, pos.qty);
+            delete positions[sym];
+            note += "; market position closed (trade idea cancelled)";
+            if (ids.length) note += ` [${ids.join(",")}]`;
+          }
+        }
         await savePositions(positions);
         await record("cancel",
-          { symbol: sym, side: null, sizeUsdt: 0, qty: 0, price: null, leverage: 0 },
-          live, true,
-          live ? `cancelled ${n} open order(s)` : "dry-run: pending orders cleared in tracker");
+          { symbol: sym, side: pos?.side ?? null, sizeUsdt: pos?.sizeUsdt ?? 0, qty: pos?.qty ?? 0, price: null, leverage: pos?.leverage ?? 0 },
+          live, true, note);
         return;
       }
 
@@ -481,6 +504,49 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
       }
     }
 
+    // 加倉計劃: execute a planned add when price reaches the level from the
+    // entry side (works for pyramiding levels and averaging-down levels alike)
+    const pending = pos.pendingAdds ?? [];
+    while (pending.length) {
+      const level = pending[0];
+      const reached =
+        level < pos.entryPrice ? price <= level : price >= level;
+      if (!reached) break;
+      pending.shift();
+      if (pos.addCount >= settings.trading.risk.maxAddsPerPosition) {
+        actions.push(`${sym}: add level ${level} reached but max adds used, skipped`);
+        changed = true;
+        continue;
+      }
+      const addUsdt =
+        settings.trading.addPositionUsdt > 0
+          ? settings.trading.addPositionUsdt
+          : settings.trading.sizing.fixedUsdt;
+      try {
+        const res = await placeEntry(
+          client, live && !pos.dryRun, sym, pos.side, addUsdt,
+          "market", null, price
+        );
+        const newQty = pos.qty + res.qty;
+        pos.entryPrice = (pos.entryPrice * pos.qty + res.price * res.qty) / newQty;
+        pos.qty = newQty;
+        pos.originalQty += res.qty;
+        pos.sizeUsdt += addUsdt;
+        pos.addCount += 1;
+        changed = true;
+        actions.push(`${sym}: planned add at ${level} executed (${addUsdt} USDT)`);
+        await record("add",
+          { symbol: sym, side: pos.side, sizeUsdt: addUsdt, qty: res.qty, price: res.price, leverage: pos.leverage },
+          live && !pos.dryRun, true,
+          `加倉計劃 level ${level} reached at ${price}; ${res.note}`, res.orderIds);
+      } catch (err) {
+        pending.unshift(level); // retry next tick
+        actions.push(`${sym}: planned add FAILED: ${(err as Error).message}`);
+        break;
+      }
+    }
+    pos.pendingAdds = pending;
+
     // stop-loss: close everything
     if (pos.stopLoss != null && (price - pos.stopLoss) * dir <= 0) {
       try {
@@ -515,6 +581,29 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
         await record("tp_hit",
           { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: qtyToClose, price, leverage: pos.leverage },
           live && !pos.dryRun, true, `take-profit ${target} hit at ${price}`, ids);
+
+        // 觸及止盈一 -> 止損移到進場價附近 (多單移到下方一點點, 空單鏡像)
+        const t = settings.trading.trailing;
+        if (t.moveToBreakevenOnTp1 && !pos.beMoved && pos.qty > 1e-9) {
+          const offset = t.breakevenOffsetPercent / 100;
+          const newSl =
+            pos.side === "long"
+              ? pos.entryPrice * (1 - offset)
+              : pos.entryPrice * (1 + offset);
+          const better =
+            pos.stopLoss == null ||
+            (pos.side === "long" ? newSl > pos.stopLoss : newSl < pos.stopLoss);
+          pos.beMoved = true;
+          if (better) {
+            const old = pos.stopLoss;
+            pos.stopLoss = newSl;
+            actions.push(`${sym}: TP1 hit -> SL moved to breakeven zone ${newSl.toFixed(6)}`);
+            await record("trailing_move",
+              { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: pos.qty, price: newSl, leverage: pos.leverage },
+              live && !pos.dryRun, true,
+              `TP1 hit: SL ${old ?? "none"} -> ${newSl.toFixed(6)} (entry ${pos.entryPrice})`);
+          }
+        }
       } catch (err) {
         pos.takeProfits.unshift(target); // retry next tick
         actions.push(`${sym}: TP close FAILED: ${(err as Error).message}`);

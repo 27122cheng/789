@@ -153,3 +153,111 @@ describe("dry-run pipeline", () => {
     expect(orders[0].success).toBe(true);
   });
 });
+
+describe("加密掃描 Pro pipeline behaviours", () => {
+  const LONG_TERM = `🔼 加密掃描 Pro — 長線單升級信號
+▼ 做空（Short）：ONE/USDT
+📍 進場： $0.00117914
+🛑 止損： $0.00120651 (+2.32%)
+🏁 最終止盈： $0.00096014 (-18.57% | R:R 8.0:1)
+💰 加倉計劃（2 次）
+ 🥇 加倉 1： $0.00110614
+ 🥈 加倉 2： $0.00103314`;
+
+  it("executes planned add levels when price reaches them", async () => {
+    const cfg = settings();
+    cfg.trading.risk.cooldownSeconds = 0;
+    await handleIncomingMessage(LONG_TERM, meta(), cfg);
+    let positions = await getPositions();
+    let pos = positions["ONEUSDT"];
+    expect(pos).toBeDefined();
+    expect(pos.side).toBe("short");
+    expect(pos.pendingAdds).toEqual([0.00110614, 0.00103314]);
+
+    // price falls to the first add level -> planned add executes
+    stubFetchPrice(0.0011);
+    await monitorTick(cfg);
+    positions = await getPositions();
+    pos = positions["ONEUSDT"];
+    expect(pos.addCount).toBe(1);
+    expect(pos.pendingAdds).toEqual([0.00103314]);
+
+    // falls through the second level too
+    stubFetchPrice(0.00103);
+    await monitorTick(cfg);
+    positions = await getPositions();
+    pos = positions["ONEUSDT"];
+    expect(pos.addCount).toBe(2);
+    expect(pos.pendingAdds).toEqual([]);
+  });
+
+  it("moves SL near entry after TP1 is hit", async () => {
+    const cfg = settings();
+    cfg.trading.risk.cooldownSeconds = 0;
+    await handleIncomingMessage(
+      `▲ 做多（Long）：ZEC/USDT
+📍 進場： $533
+🛑 止損： $526.133 (-1.29%)
+🎯 止盈一： $543.301 (+1.93% | R:R 1.5:1)
+🚀 止盈二： $553.601 (+3.87% | R:R 3.0:1)`,
+      meta(), cfg
+    );
+    stubFetchPrice(544); // TP1 hit
+    await monitorTick(cfg);
+    const positions = await getPositions();
+    const pos = positions["ZECUSDT"];
+    expect(pos).toBeDefined();
+    expect(pos.takeProfits).toEqual([553.601]);
+    // SL moved to entry * (1 - 0.2%) = 531.934
+    expect(pos.stopLoss).toBeCloseTo(533 * 0.998, 3);
+    expect(pos.beMoved).toBe(true);
+  });
+
+  it("applies a bot 建議止損調整 message to the tracked position", async () => {
+    const cfg = settings();
+    cfg.trading.risk.cooldownSeconds = 0;
+    await handleIncomingMessage(
+      `▼ 做空（Short）：XTZ/USDT
+📍 進場： $0.2394
+🛑 止損： $0.2450
+🏁 最終止盈： $0.2000`,
+      meta(), cfg
+    );
+    await handleIncomingMessage(
+      `🚀 AI 偵測：盈利 3.2R，建議追蹤止損
+💎 XTZ/USDT ▼ 空
+🛑 建議止損調整
+ 新止損： $0.237906`,
+      meta(), cfg
+    );
+    const positions = await getPositions();
+    expect(positions["XTZUSDT"].stopLoss).toBe(0.237906);
+  });
+
+  it("rejects an open signal without entry/SL when requireEntryAndSl is on", async () => {
+    const cfg = settings();
+    await handleIncomingMessage("APTUSDT 做多 看起來不錯", meta(), cfg);
+    const positions = await getPositions();
+    expect(positions["APTUSDT"]).toBeUndefined();
+  });
+
+  it("交易建議已取消 closes the tracked market position", async () => {
+    const cfg = settings();
+    cfg.trading.risk.cooldownSeconds = 0;
+    await handleIncomingMessage(
+      `▲ 做多（Long）：ACH/USDT
+📍 進場： $0.02
+🛑 止損： $0.019
+🎯 止盈一： $0.022`,
+      meta(), cfg
+    );
+    expect((await getPositions())["ACHUSDT"]).toBeDefined();
+    await handleIncomingMessage(
+      `🚫 交易建議已取消
+▲ 做多（Long）：ACH/USDT
+📋 取消原因：訊號品質下降`,
+      meta(), cfg
+    );
+    expect((await getPositions())["ACHUSDT"]).toBeUndefined();
+  });
+});

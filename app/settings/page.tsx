@@ -37,6 +37,9 @@ export default function SettingsPage() {
   const [trailEnabled, setTrailEnabled] = useState(false);
   const [trailActivate, setTrailActivate] = useState(2);
   const [trailCallback, setTrailCallback] = useState(1);
+  const [beOnTp1, setBeOnTp1] = useState(true);
+  const [beOffset, setBeOffset] = useState(0.2);
+  const [requireEntrySl, setRequireEntrySl] = useState(true);
   const [ignoreKeywords, setIgnoreKeywords] = useState("");
 
   const load = useCallback(async () => {
@@ -75,6 +78,9 @@ export default function SettingsPage() {
     setTrailEnabled(!!s.trading.trailing.enabled);
     setTrailActivate(s.trading.trailing.activateProfitPercent);
     setTrailCallback(s.trading.trailing.callbackPercent);
+    setBeOnTp1(s.trading.trailing.moveToBreakevenOnTp1 !== false);
+    setBeOffset(s.trading.trailing.breakevenOffsetPercent ?? 0.2);
+    setRequireEntrySl(s.trading.risk.requireEntryAndSl !== false);
     setIgnoreKeywords((s.filters.ignoreKeywords ?? []).join(", "));
   }, []);
 
@@ -113,6 +119,7 @@ export default function SettingsPage() {
             maxAddsPerPosition: Number(maxAdds),
             cooldownSeconds: Number(cooldown),
             maxSignalAgeSeconds: Number(maxAge),
+            requireEntryAndSl: requireEntrySl,
           },
           orders: {
             entryType,
@@ -123,6 +130,8 @@ export default function SettingsPage() {
             enabled: trailEnabled,
             activateProfitPercent: Number(trailActivate),
             callbackPercent: Number(trailCallback),
+            moveToBreakevenOnTp1: beOnTp1,
+            breakevenOffsetPercent: Number(beOffset),
           },
         },
         filters: { ignoreKeywords: splitList(ignoreKeywords) },
@@ -298,6 +307,20 @@ export default function SettingsPage() {
                    onChange={(e) => setTrailCallback(+e.target.value)} />
           </div>
         </div>
+        <div className="row">
+          <div className="checkbox" style={{ alignSelf: "end" }}>
+            <input type="checkbox" id="betp1" checked={beOnTp1}
+                   onChange={(e) => setBeOnTp1(e.target.checked)} />
+            <label htmlFor="betp1" style={{ margin: 0 }}>
+              觸及止盈一後把止損移到進場價附近（多單下方、空單上方）
+            </label>
+          </div>
+          <div>
+            <label>距進場價的偏移 (%)</label>
+            <input type="number" step="0.05" value={beOffset}
+                   onChange={(e) => setBeOffset(+e.target.value)} />
+          </div>
+        </div>
       </div>
 
       <div className="panel">
@@ -329,6 +352,13 @@ export default function SettingsPage() {
         </div>
         <label>信號最大時效（秒，過舊的訊息不執行）</label>
         <input type="number" value={maxAge} onChange={(e) => setMaxAge(+e.target.value)} />
+        <div className="checkbox">
+          <input type="checkbox" id="reqsl" checked={requireEntrySl}
+                 onChange={(e) => setRequireEntrySl(e.target.checked)} />
+          <label htmlFor="reqsl" style={{ margin: 0 }}>
+            開倉信號必須有進場價與止損才執行（建議開啟，避免分析文被誤判成信號）
+          </label>
+        </div>
         <label>忽略關鍵字（訊息含任一關鍵字即過濾，逗號分隔）— 用來擋數據公布、新聞、廣告</label>
         <textarea value={ignoreKeywords} onChange={(e) => setIgnoreKeywords(e.target.value)} />
       </div>

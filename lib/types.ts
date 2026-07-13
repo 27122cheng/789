@@ -17,6 +17,7 @@ export interface ParsedSignal {
   stopLoss: number | null;
   stopLossBreakeven: boolean;   // "移至保本/成本" style update_sl
   sizeUsdt: number | null;
+  addLevels: number[];          // 加倉計劃 price levels from long-term signals
   rawText: string;
   chatId: string;
   messageId: number;
@@ -36,6 +37,9 @@ export interface Position {
   stopLoss: number | null;
   takeProfits: number[];       // remaining TP targets
   tpCountOriginal: number;
+  pendingAdds: number[];       // 加倉計劃 levels not yet reached
+  entryOrderType: "market" | "limit";
+  beMoved: boolean;            // SL already moved to breakeven after TP1
   orderIds: string[];          // pending entry order ids (limit entries)
   openedAt: number;
   addCount: number;
@@ -97,6 +101,9 @@ export interface Settings {
       maxAddsPerPosition: number;
       cooldownSeconds: number;
       maxSignalAgeSeconds: number;
+      // reject open signals that carry no entry price or no stop loss
+      // (protects against analysis chatter being misread as a signal)
+      requireEntryAndSl: boolean;
     };
     orders: {
       entryType: "market" | "limit";
@@ -107,6 +114,10 @@ export interface Settings {
       enabled: boolean;
       activateProfitPercent: number; // 價格獲利 % 達標後啟動
       callbackPercent: number;       // 回撤 % 觸發（SL 跟在最新價後面這個距離）
+      // 觸及止盈一後把止損移到進場價附近（多單移到進場價下方一點點，
+      // 空單鏡像移到上方），offset 為距離進場價的百分比
+      moveToBreakevenOnTp1: boolean;
+      breakevenOffsetPercent: number;
     };
   };
   filters: {
@@ -141,6 +152,7 @@ export const DEFAULT_SETTINGS: Settings = {
       maxAddsPerPosition: 2,
       cooldownSeconds: 30,
       maxSignalAgeSeconds: 120,
+      requireEntryAndSl: true,
     },
     orders: {
       entryType: "market",
@@ -151,6 +163,8 @@ export const DEFAULT_SETTINGS: Settings = {
       enabled: false,
       activateProfitPercent: 2,
       callbackPercent: 1,
+      moveToBreakevenOnTp1: true,
+      breakevenOffsetPercent: 0.2,
     },
   },
   filters: {
