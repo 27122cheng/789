@@ -12,6 +12,7 @@ import {
   Position,
   Settings,
   SignalRecord,
+  WebhookEvent,
 } from "./types";
 
 const KEY_PREFIX = "tpx:";
@@ -23,8 +24,10 @@ const K_COOLDOWN = KEY_PREFIX + "cooldown";
 const K_DEDUP = KEY_PREFIX + "dedup";
 const K_ADMIN_HASH = KEY_PREFIX + "adminPasswordHash";
 const K_CRON_SECRET = KEY_PREFIX + "cronSecret";
+const K_WEBHOOK_EVENTS = KEY_PREFIX + "webhookEvents";
 
 const MAX_LOG = 200;
+const MAX_WEBHOOK_EVENTS = 50;
 
 // Built-in fallback credentials (owner's Upstash database) so the app works
 // without any Vercel environment configuration. Env vars take precedence.
@@ -124,6 +127,20 @@ export async function appendOrder(record: OrderRecord): Promise<void> {
 
 export async function getOrders(): Promise<OrderRecord[]> {
   return (await kvGet<OrderRecord[]>(K_ORDERS)) ?? [];
+}
+
+// --------------------------------------------- raw webhook diagnostic log
+/** Records EVERY update that reaches the webhook - even ones we drop - so the
+ *  dashboard can show whether Telegram is delivering anything at all, what
+ *  chat ids are arriving, and why a message was ignored. */
+export async function appendWebhookEvent(event: WebhookEvent): Promise<void> {
+  const list = (await kvGet<WebhookEvent[]>(K_WEBHOOK_EVENTS)) ?? [];
+  list.unshift(event);
+  await kvSet(K_WEBHOOK_EVENTS, list.slice(0, MAX_WEBHOOK_EVENTS));
+}
+
+export async function getWebhookEvents(): Promise<WebhookEvent[]> {
+  return (await kvGet<WebhookEvent[]>(K_WEBHOOK_EVENTS)) ?? [];
 }
 
 // -------------------------------------------------- cooldown & dedup state

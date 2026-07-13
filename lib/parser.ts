@@ -255,13 +255,28 @@ export function parseSignal(
   const mentionsTp = /止盈|\btp\d*\b|take\s*profit|目标价|目標價/i.test(norm);
   const hasMoveVerb = findKeyword(MOVE_VERBS, lower) >= 0;
 
+  const side = extractSide(
+    lower,
+    options.extraLongKeywords ?? [],
+    options.extraShortKeywords ?? []
+  );
+  const hasEntry = entry.low !== null;
+  const hasSl = strictSl !== null;
+  const hasTp = takeProfits.length > 0;
+  const hasPriceStructure = hasEntry || hasSl || hasTp;
+  // explicit "this is an entry setup" wording used by signal bots
+  const entrySetupMarker =
+    /短線單|短线单|長線單|长线单|信號|信号|建單|建单|開倉|开仓|進場|进场|entry|做多|做空|\blong\b|\bshort\b/i.test(
+      norm
+    );
+
   if (findKeyword(CANCEL_KEYWORDS, lower) >= 0) {
     action = "cancel";
   } else if (SL_ADJUST_MARKERS.test(norm)) {
     action = "update_sl";
   } else if (CLOSED_MARKERS.test(norm)) {
     action = "close";
-  } else if (entry.low !== null && (strictSl !== null || takeProfits.length > 0)) {
+  } else if (hasEntry && (hasSl || hasTp)) {
     // full signal structure (entry + SL/TP) -> a fresh open, even if the
     // message also mentions 加倉計劃 levels or trailing-stop advice text
     action = "open";
@@ -273,24 +288,23 @@ export function parseSignal(
     action = "update_tp";
   } else if (findKeyword(CLOSE_KEYWORDS, lower) >= 0) {
     action = "close";
-  } else {
+  } else if (side && hasPriceStructure && entrySetupMarker) {
+    // directional + at least one price level + entry wording -> a terse open
     action = "open";
+    if (!hasEntry) warnings.push("open signal without an explicit entry price");
+  } else {
+    // A symbol with no action keyword, no price structure, and no clear
+    // entry setup is analysis/commentary/prediction - NOT a tradable signal.
+    // Returning null keeps the dashboard's signal log clean and stops noise
+    // from being logged as rejected opens.
+    return null;
   }
 
   if (action === "update_sl") {
     breakeven = findKeyword(BREAKEVEN_KEYWORDS, lower) >= 0;
   }
-
-  let side: "long" | "short" | null = null;
-  if (action === "open" || action === "add" || action === "cancel") {
-    side = extractSide(
-      lower,
-      options.extraLongKeywords ?? [],
-      options.extraShortKeywords ?? []
-    );
-    if (action === "open" && !side) {
-      warnings.push("open signal without long/short side");
-    }
+  if (action === "open" && !side) {
+    warnings.push("open signal without long/short side");
   }
 
   const stopLoss =

@@ -72,6 +72,22 @@ export interface SignalRecord {
   rawText: string;
 }
 
+/** Raw diagnostic record of a single update hitting the webhook, logged
+ *  regardless of whether it was accepted, so the dashboard can explain why
+ *  nothing is being detected. */
+export interface WebhookEvent {
+  at: number;
+  updateType: string;         // "message" | "channel_post" | "edited_message" | ...
+  chatId: string | null;
+  chatTitle: string | null;
+  chatType: string | null;    // "private" | "group" | "supergroup" | "channel"
+  chatUsername: string | null;
+  fromBot: boolean;           // sender is a bot -> normally undeliverable to us
+  outcome: "accepted" | "chat_not_allowed" | "empty_text" | "unsupported" | "error";
+  detail: string;
+  textPreview: string;
+}
+
 export interface Settings {
   telegram: {
     botToken: string;

@@ -39,11 +39,18 @@ describe("open signals", () => {
     expect(s.stopLoss).toBe(59500);
   });
 
-  it("flags open signal without side", () => {
-    const s = parseSignal("BTCUSDT entry 60000", meta)!;
+  it("flags a structural open without side but warns", () => {
+    // entry + SL present -> clearly an open, even though side is missing
+    const s = parseSignal("BTCUSDT entry 60000 SL 59000", meta)!;
     expect(s.action).toBe("open");
     expect(s.side).toBeNull();
     expect(s.warnings.length).toBeGreaterThan(0);
+  });
+
+  it("treats a bare symbol+price with no structure as NOT a signal", () => {
+    // no side, no SL/TP, no action keyword -> analysis/chatter, not tradable
+    expect(parseSignal("BTCUSDT 60000 附近觀望", meta)).toBeNull();
+    expect(parseSignal("BTCUSDT 目前 60000", meta)).toBeNull();
   });
 
   it("extracts explicit USDT size", () => {

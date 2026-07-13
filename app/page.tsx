@@ -21,6 +21,9 @@ export default function Dashboard() {
   const [authed, setAuthed] = useState(false);
   const [error, setError] = useState("");
   const [state, setState] = useState<any>(null);
+  const [diag, setDiag] = useState<any>(null);
+  const [testText, setTestText] = useState("");
+  const [testResult, setTestResult] = useState<any>(null);
 
   const load = useCallback(async () => {
     const { status, body } = await apiFetch("/api/state");
@@ -28,12 +31,23 @@ export default function Dashboard() {
       setState(body);
       setAuthed(true);
       setError("");
+      apiFetch("/api/telegram/diag").then((r) => {
+        if (r.status === 200) setDiag(r.body);
+      });
     } else {
       setAuthed(false);
       // 428 = first-run, the LoginPanel shows the setup flow itself
       setError(body?.needsSetup ? "" : body?.error ?? `HTTP ${status}`);
     }
   }, []);
+
+  async function runTest() {
+    const { status, body } = await apiFetch("/api/parse-test", {
+      method: "POST",
+      body: JSON.stringify({ text: testText }),
+    });
+    setTestResult(status === 200 ? body : { error: body?.error ?? status });
+  }
 
   useEffect(() => {
     if (getStoredPassword()) load();
@@ -85,6 +99,84 @@ export default function Dashboard() {
           <b>不會保存</b>，請在 Vercel 專案加入 Upstash Redis integration。
         </div>
       )}
+
+      <h2>Telegram 連線診斷</h2>
+      <div className="panel">
+        {!diag ? (
+          <p className="hint">載入中…</p>
+        ) : (
+          <>
+            {diag.problems && diag.problems.length > 0 ? (
+              diag.problems.map((p: string, i: number) => (
+                <div className="banner warn" key={i}>⚠️ {p}</div>
+              ))
+            ) : (
+              <div className="banner dry">✅ Webhook 已註冊且沒有偵測到問題</div>
+            )}
+            <table>
+              <tbody>
+                <tr><th>機器人帳號</th><td className="mono">{diag.botUsername ? "@" + diag.botUsername : (diag.botToken ? "?" : "未設定 token")}</td></tr>
+                <tr><th>Webhook 已註冊</th><td>{diag.webhook?.registered ? "是" : "否"}</td></tr>
+                <tr><th>指向網址正確</th><td>{diag.webhook?.registered ? (diag.webhook?.urlMatches ? "是" : "否（指向別處）") : "-"}</td></tr>
+                <tr><th>積壓未處理更新</th><td>{diag.webhook?.pendingUpdateCount ?? "-"}</td></tr>
+                <tr><th>Telegram 最近錯誤</th><td className="fail">{diag.webhook?.lastErrorMessage ?? "無"}</td></tr>
+              </tbody>
+            </table>
+            <p className="hint" style={{ marginTop: 12 }}>
+              下方是「原始進站事件」——不論有沒有被採用，每一筆到達 webhook 的更新都會記錄，
+              用來確認 Telegram 到底有沒有把訊息送過來、以及來自哪個群組。
+            </p>
+            <div style={{ overflowX: "auto" }}>
+              <table>
+                <thead>
+                  <tr><th>時間</th><th>類型</th><th>群組</th><th>來自機器人</th><th>結果</th><th>說明</th></tr>
+                </thead>
+                <tbody>
+                  {(diag.events ?? []).length === 0 ? (
+                    <tr><td colSpan={6} className="hint">
+                      還沒有收到任何進站事件。代表 Telegram 完全沒有把訊息送到這個網站——
+                      通常是 webhook 沒註冊、機器人不在群組裡、或信號來自另一個機器人。
+                    </td></tr>
+                  ) : (
+                    diag.events.map((e: any, i: number) => (
+                      <tr key={i}>
+                        <td className="mono">{fmtTime(e.at)}</td>
+                        <td>{e.updateType}</td>
+                        <td className="mono">{e.chatTitle ?? e.chatId ?? "-"}<br/>
+                          <span style={{ color: "var(--muted)", fontSize: 11 }}>{e.chatType}{e.chatId ? " " + e.chatId : ""}</span>
+                        </td>
+                        <td>{e.fromBot ? "⚠️ 是" : "否"}</td>
+                        <td className={e.outcome === "accepted" ? "ok" : "fail"}>{e.outcome}</td>
+                        <td style={{ maxWidth: 280, fontSize: 12 }}>{e.detail}<br/>
+                          <span style={{ color: "var(--muted)" }}>{e.textPreview}</span>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </div>
+
+      <h2>測試訊息解析</h2>
+      <div className="panel">
+        <p className="hint">
+          把一則群組訊息貼進來，看系統會怎麼判定（開倉/加倉/平倉/取消/移動止損/忽略），
+          不用真的發到群組就能驗證判斷力。
+        </p>
+        <textarea value={testText} onChange={(e) => setTestText(e.target.value)}
+                  style={{ minHeight: 120 }}
+                  placeholder="貼上一則信號或訊息…" />
+        <button onClick={runTest} disabled={!testText.trim()}>測試解析</button>
+        {testResult && (
+          <pre style={{ marginTop: 12, background: "var(--bg)", padding: 12,
+                        borderRadius: 6, overflowX: "auto", fontSize: 12 }}>
+            {JSON.stringify(testResult, null, 2)}
+          </pre>
+        )}
+      </div>
 
       <div className="statgrid">
         <div className="stat">

@@ -139,3 +139,41 @@ describe("加密掃描 Pro formats", () => {
     expect(s.leverage).toBeNull(); // "R:R 1.5:1" etc. must not become leverage
   });
 });
+
+describe("noise rejection (analysis posts must NOT become signals)", () => {
+  it("ignores a market-analysis link post that mentions a coin", () => {
+    // e.g. the "查看 TRB 詳細分析 →" style rows and daily briefings
+    expect(
+      parseSignal("🔗 查看 BTCUSDT 詳細分析 →\n📈 本週預測：偏多（信心 70%）", meta)
+    ).toBeNull();
+  });
+
+  it("ignores a standalone AI 止損位分析 commentary block without a new stop", () => {
+    const s = parseSignal(
+      `🔍 BTCUSDT AI 止損位分析（技術 ＋ 籌碼 ＋ 基本面）
+ ⚠️ MACD 柱狀轉正，空頭動能減弱 -0.4
+ ✅ RSI 54.8 空頭健康區，趨勢延續 +0.3
+ ✅ ADX 29.2 趨勢有效 +0.2`,
+      meta
+    );
+    // no entry, no explicit 新止損/調整 value, no action -> not tradable
+    expect(s).toBeNull();
+  });
+
+  it("ignores a daily prediction summary", () => {
+    expect(
+      parseSignal(
+        "📅 今日預測：ETHUSDT ▼ 小幅偏空（信心 62%）\n📊 ATR 波動率：1.30%",
+        meta
+      )
+    ).toBeNull();
+  });
+
+  it("still accepts a terse but real directional signal with a price", () => {
+    const s = parseSignal("做多 SOLUSDT 進場 150 止損 140", meta)!;
+    expect(s.action).toBe("open");
+    expect(s.side).toBe("long");
+    expect(s.entryPrice).toBe(150);
+    expect(s.stopLoss).toBe(140);
+  });
+});
