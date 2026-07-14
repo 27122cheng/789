@@ -1,7 +1,10 @@
 /**
- * Registers this deployment's /api/telegram/webhook URL with the Telegram
- * Bot API (setWebhook), using the secret token stored in settings. Call it
- * once after saving the bot token (the settings page has a button for this).
+ * (Re)registers this deployment's /api/telegram/webhook URL with the Telegram
+ * Bot API. Pressing the button always forces a clean re-sync: it rotates to a
+ * fresh secret, deletes any existing webhook, sets it again, and then reads
+ * back getWebhookInfo so the response reflects Telegram's true state. This
+ * guarantees the secret Telegram sends matches what the webhook validates,
+ * eliminating the "401 Unauthorized" stale-secret failure for good.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
@@ -16,43 +19,63 @@ export async function POST(req: NextRequest) {
   if (denied) return denied;
 
   const settings = await getSettings();
-  if (!settings.telegram.botToken) {
+  const token = settings.telegram.botToken;
+  if (!token) {
     return NextResponse.json(
-      { error: "botToken is not set - save it in settings first" },
+      { error: "尚未填入 Bot Token，請先在設定頁儲存" },
       { status: 400 }
     );
   }
-  if (!settings.telegram.webhookSecret) {
-    settings.telegram.webhookSecret = randomBytes(24).toString("hex");
-    await saveSettings(settings);
-  }
 
-  const origin =
-    req.headers.get("x-forwarded-host")
-      ? `https://${req.headers.get("x-forwarded-host")}`
-      : new URL(req.url).origin;
+  // Always rotate the secret so a stale registration can't linger.
+  settings.telegram.webhookSecret = randomBytes(24).toString("hex");
+  await saveSettings(settings);
+
+  const origin = req.headers.get("x-forwarded-host")
+    ? `https://${req.headers.get("x-forwarded-host")}`
+    : new URL(req.url).origin;
   const webhookUrl = `${origin}/api/telegram/webhook`;
 
-  const resp = await fetch(
-    `https://api.telegram.org/bot${settings.telegram.botToken}/setWebhook`,
-    {
+  async function tg(method: string, body?: Record<string, unknown>) {
+    const r = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        url: webhookUrl,
-        secret_token: settings.telegram.webhookSecret,
-        allowed_updates: [
-          "message", "edited_message", "channel_post", "edited_channel_post",
-        ],
-      }),
-    }
-  );
-  const payload = await resp.json().catch(() => ({}));
-  if (!resp.ok || !payload.ok) {
+      body: JSON.stringify(body ?? {}),
+    });
+    return r.json().catch(() => ({ ok: false, description: "non-JSON response" }));
+  }
+
+  // Clear any existing webhook first (keep pending updates so the queued
+  // message still gets delivered once the new secret is in place).
+  await tg("deleteWebhook", { drop_pending_updates: false });
+
+  const setRes = await tg("setWebhook", {
+    url: webhookUrl,
+    secret_token: settings.telegram.webhookSecret,
+    allowed_updates: [
+      "message",
+      "edited_message",
+      "channel_post",
+      "edited_channel_post",
+    ],
+  });
+
+  if (!setRes.ok) {
     return NextResponse.json(
-      { error: `Telegram setWebhook failed: ${payload.description ?? resp.status}` },
+      { error: `Telegram setWebhook 失敗：${setRes.description ?? "unknown"}` },
       { status: 502 }
     );
   }
-  return NextResponse.json({ ok: true, webhookUrl });
+
+  // Read back the true state so the UI can show it immediately.
+  const infoRes = await tg("getWebhookInfo");
+  const info = infoRes?.result ?? {};
+
+  return NextResponse.json({
+    ok: true,
+    webhookUrl,
+    registeredUrl: info.url ?? webhookUrl,
+    pendingUpdateCount: info.pending_update_count ?? 0,
+    lastErrorMessage: info.last_error_message ?? null,
+  });
 }

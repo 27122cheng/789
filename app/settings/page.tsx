@@ -150,7 +150,11 @@ export default function SettingsPage() {
     setMsg(null);
     const { status, body } = await apiFetch("/api/setup-webhook", { method: "POST" });
     if (status === 200) {
-      setMsg({ ok: true, text: `Webhook 已註冊：${body.webhookUrl}` });
+      const err = body.lastErrorMessage ? `；Telegram 最近錯誤：${body.lastErrorMessage}` : "";
+      setMsg({
+        ok: true,
+        text: `✅ 已重新註冊並同步新密鑰。積壓更新：${body.pendingUpdateCount}${err}。回儀表板看「原始進站事件」確認訊息有進來。`,
+      });
     } else {
       setMsg({ ok: false, text: body?.error ?? `註冊失敗 (HTTP ${status})` });
     }
