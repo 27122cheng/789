@@ -54,7 +54,31 @@ export async function POST(req: NextRequest) {
   const settings = await getSettings();
 
   const secret = settings.telegram.webhookSecret;
-  if (!secret || req.headers.get("x-telegram-bot-api-secret-token") !== secret) {
+  const sentToken = req.headers.get("x-telegram-bot-api-secret-token");
+  if (!secret || sentToken !== secret) {
+    // A present-but-wrong token means Telegram was registered with a stale
+    // secret (e.g. before the KV store was connected). Log it so the reason
+    // is visible in the diagnostics events table, then reject.
+    if (sentToken) {
+      try {
+        await appendWebhookEvent({
+          at: Date.now(),
+          updateType: "auth",
+          chatId: null,
+          chatTitle: null,
+          chatType: null,
+          chatUsername: null,
+          fromBot: false,
+          outcome: "error",
+          detail:
+            "webhook 密鑰不符（401）：Telegram 註冊時用的密鑰與目前不同。" +
+            "請到設定頁按「註冊 Telegram Webhook」重新同步。",
+          textPreview: "",
+        });
+      } catch {
+        /* ignore */
+      }
+    }
     return NextResponse.json({ ok: false }, { status: 401 });
   }
 
