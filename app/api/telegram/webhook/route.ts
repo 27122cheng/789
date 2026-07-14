@@ -10,6 +10,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { handleIncomingMessage } from "@/lib/executor";
 import { appendWebhookEvent, getSettings } from "@/lib/store";
+import { deriveWebhookSecret } from "@/lib/telegram";
 import { WebhookEvent } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -53,9 +54,17 @@ function chatAllowed(chat: TgChat, allowed: string[]): boolean {
 export async function POST(req: NextRequest) {
   const settings = await getSettings();
 
-  const secret = settings.telegram.webhookSecret;
+  // Validate against the deterministic secret derived from the bot token, so
+  // registration and validation never desync (see lib/telegram.ts). Fall back
+  // to the stored secret for any webhook registered before this change.
+  const derived = settings.telegram.botToken
+    ? deriveWebhookSecret(settings.telegram.botToken)
+    : "";
+  const stored = settings.telegram.webhookSecret;
   const sentToken = req.headers.get("x-telegram-bot-api-secret-token");
-  if (!secret || sentToken !== secret) {
+  const matches =
+    (!!derived && sentToken === derived) || (!!stored && sentToken === stored);
+  if (!matches) {
     // A present-but-wrong token means Telegram was registered with a stale
     // secret (e.g. before the KV store was connected). Log it so the reason
     // is visible in the diagnostics events table, then reject.

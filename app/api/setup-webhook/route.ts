@@ -9,7 +9,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
 import { getSettings, saveSettings } from "@/lib/store";
-import { randomBytes } from "node:crypto";
+import { deriveWebhookSecret } from "@/lib/telegram";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,8 +27,12 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Always rotate the secret so a stale registration can't linger.
-  settings.telegram.webhookSecret = randomBytes(24).toString("hex");
+  // Deterministic secret derived from the bot token: registration and the
+  // webhook validator always compute the same value, so they can never
+  // desync (no reliance on KV write propagation). Persist it too so the
+  // diagnostics/settings views stay consistent.
+  const secret = deriveWebhookSecret(token);
+  settings.telegram.webhookSecret = secret;
   await saveSettings(settings);
 
   const origin = req.headers.get("x-forwarded-host")
@@ -51,7 +55,7 @@ export async function POST(req: NextRequest) {
 
   const setRes = await tg("setWebhook", {
     url: webhookUrl,
-    secret_token: settings.telegram.webhookSecret,
+    secret_token: secret,
     allowed_updates: [
       "message",
       "edited_message",
