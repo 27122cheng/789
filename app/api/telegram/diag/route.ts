@@ -11,6 +11,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
 import { getSettings, getWebhookEvents } from "@/lib/store";
+import { publicOrigin } from "@/lib/telegram";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -31,9 +32,7 @@ export async function GET(req: NextRequest) {
     });
   }
 
-  const origin = req.headers.get("x-forwarded-host")
-    ? `https://${req.headers.get("x-forwarded-host")}`
-    : new URL(req.url).origin;
+  const origin = publicOrigin(req.headers.get("x-forwarded-host"), req.url);
   const expectedUrl = `${origin}/api/telegram/webhook`;
 
   async function tg(method: string) {
@@ -59,6 +58,15 @@ export async function GET(req: NextRequest) {
   else if (!urlMatches)
     problems.push(
       `Webhook 目前指向 ${wh.url}，與這個網站 ${expectedUrl} 不同；請重新註冊`
+    );
+  // A webhook pointing at a deployment-specific URL gets blocked by Vercel
+  // Deployment Protection with a 401 before our code runs.
+  const looksLikeDeploymentUrl =
+    typeof wh.url === "string" && /-[a-z0-9]+-[^.]+\.vercel\.app/i.test(wh.url);
+  if (registered && looksLikeDeploymentUrl && !urlMatches)
+    problems.push(
+      "Webhook 指向「部署專屬網址」，會被 Vercel Deployment Protection 以 401 擋下。" +
+        "請按設定頁的「註冊 Telegram Webhook」改註冊到正式網域。"
     );
   if (wh.last_error_message)
     problems.push(`Telegram 最近一次送信錯誤：${wh.last_error_message}`);

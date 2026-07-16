@@ -9,7 +9,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
 import { getSettings, saveSettings } from "@/lib/store";
-import { deriveWebhookSecret } from "@/lib/telegram";
+import { deriveWebhookSecret, publicOrigin } from "@/lib/telegram";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -35,9 +35,7 @@ export async function POST(req: NextRequest) {
   settings.telegram.webhookSecret = secret;
   await saveSettings(settings);
 
-  const origin = req.headers.get("x-forwarded-host")
-    ? `https://${req.headers.get("x-forwarded-host")}`
-    : new URL(req.url).origin;
+  const origin = publicOrigin(req.headers.get("x-forwarded-host"), req.url);
   const webhookUrl = `${origin}/api/telegram/webhook`;
 
   async function tg(method: string, body?: Record<string, unknown>) {

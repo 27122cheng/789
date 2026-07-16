@@ -19,3 +19,19 @@ export function deriveWebhookSecret(botToken: string): string {
     .update("tpx-webhook-v1:" + botToken)
     .digest("hex");
 }
+
+/**
+ * Public origin to register the webhook on.
+ *
+ * Deployment-specific URLs (789-abc123-user.vercel.app) are protected by
+ * Vercel Deployment Protection: unauthenticated requests - i.e. Telegram's
+ * deliveries - get a Vercel-level 401 before our code ever runs. The stable
+ * production domain is always public, so prefer it via the
+ * VERCEL_PROJECT_PRODUCTION_URL env var Vercel injects at runtime.
+ */
+export function publicOrigin(forwardedHost: string | null, reqUrl: string): string {
+  const prod = process.env.VERCEL_PROJECT_PRODUCTION_URL;
+  if (prod) return `https://${prod}`;
+  if (forwardedHost) return `https://${forwardedHost}`;
+  return new URL(reqUrl).origin;
+}
