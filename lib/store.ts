@@ -28,7 +28,7 @@ const K_WEBHOOK_EVENTS = KEY_PREFIX + "webhookEvents";
 
 // 10 pages x 10 rows in the UI; oldest entries beyond this are dropped
 const MAX_LOG = 100;
-const MAX_WEBHOOK_EVENTS = 50;
+const MAX_WEBHOOK_EVENTS = 100;
 
 // Built-in fallback credentials (owner's Upstash database) so the app works
 // without any Vercel environment configuration. Env vars take precedence.

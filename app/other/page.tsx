@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch, getStoredPassword } from "../client";
 import LoginPanel from "../LoginPanel";
+import Pager, { PER_PAGE } from "../Pager";
 
 function fmtTime(ms: number): string {
   return new Date(ms).toLocaleString("zh-TW", { hour12: false });
@@ -16,6 +17,7 @@ export default function OtherPage() {
   const [diag, setDiag] = useState<any>(null);
   const [testText, setTestText] = useState("");
   const [testResult, setTestResult] = useState<any>(null);
+  const [eventPage, setEventPage] = useState(0);
 
   const load = useCallback(async () => {
     const { status, body } = await apiFetch("/api/state");
@@ -120,7 +122,9 @@ export default function OtherPage() {
                       還沒有收到任何進站事件。
                     </td></tr>
                   ) : (
-                    diag.events.map((e: any, i: number) => (
+                    (diag.events as any[])
+                      .slice(eventPage * PER_PAGE, (eventPage + 1) * PER_PAGE)
+                      .map((e: any, i: number) => (
                       <tr key={i}>
                         <td className="mono">{fmtTime(e.at)}</td>
                         <td>{e.updateType}</td>
@@ -138,6 +142,8 @@ export default function OtherPage() {
                 </tbody>
               </table>
             </div>
+            <Pager page={eventPage} total={(diag.events ?? []).length}
+                   onPage={setEventPage} />
           </>
         )}
       </div>
