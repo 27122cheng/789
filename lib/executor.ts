@@ -10,7 +10,7 @@
  * stop orders - but it is only as granular as how often the monitor runs.
  */
 import { parseSignal, dedupKey, isFiltered } from "./parser";
-import { PionexApiError, PionexClient, toPerpSymbol } from "./pionex";
+import { PionexApiError, PionexClient } from "./pionex";
 import {
   appendOrder,
   appendSignal,
@@ -27,7 +27,8 @@ function makeClient(settings: Settings): PionexClient {
   return new PionexClient(
     settings.pionex.apiKey,
     settings.pionex.apiSecret,
-    settings.pionex.baseUrl
+    settings.pionex.baseUrl,
+    settings.pionex.symbolFormat
   );
 }
 
@@ -107,7 +108,7 @@ async function fetchPriceSafe(
   fallback: number | null
 ): Promise<number | null> {
   try {
-    return await client.getPrice(toPerpSymbol(symbol));
+    return await client.getPrice(client.perpSymbol(symbol));
   } catch {
     return fallback;
   }
@@ -166,7 +167,7 @@ async function placeEntry(
   limitPrice: number | null,
   refPrice: number | null
 ): Promise<{ qty: number; price: number; orderIds: string[]; note: string }> {
-  const perp = toPerpSymbol(symbol);
+  const perp = client.perpSymbol(symbol);
   const price = limitPrice ?? refPrice;
   if (!price || price <= 0) throw new Error(`no price available for ${symbol}`);
   const qty = sizeUsdt / price;
@@ -212,7 +213,7 @@ async function closeQty(
   qty: number
 ): Promise<string[]> {
   if (!live || pos.dryRun) return [];
-  const perp = toPerpSymbol(pos.symbol);
+  const perp = client.perpSymbol(pos.symbol);
   const apiSide = pos.side === "long" ? "SELL" : "BUY";
   let resp: Record<string, any>;
   if (apiSide === "SELL") {
@@ -422,7 +423,7 @@ export async function executeSignal(
         // Silent background handling: cancel exchange orders / drop or close
         // the tracked position, purge the trade's earlier signal & order
         // records, and record nothing new.
-        if (live) await client.cancelAllOrders(toPerpSymbol(sym));
+        if (live) await client.cancelAllOrders(client.perpSymbol(sym));
         if (pos) {
           if (pos.entryOrderType !== "limit") {
             // market entry already filled -> cancelling the idea means exiting
@@ -474,8 +475,9 @@ export async function executeSignal(
       }
     }
   } catch (err) {
+    // PionexApiError.message already carries the "Pionex API error ..." prefix
     const msg = err instanceof PionexApiError
-      ? `Pionex API error: ${err.message}`
+      ? err.message
       : `execution failed: ${(err as Error).message}`;
     await record(signal.action,
       { symbol: sym, side: signal.side, sizeUsdt: 0, qty: 0, price: null, leverage: 0 },

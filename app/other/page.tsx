@@ -18,6 +18,9 @@ export default function OtherPage() {
   const [testText, setTestText] = useState("");
   const [testResult, setTestResult] = useState<any>(null);
   const [eventPage, setEventPage] = useState(0);
+  const [probeCoin, setProbeCoin] = useState("");
+  const [probeResult, setProbeResult] = useState<any>(null);
+  const [probing, setProbing] = useState(false);
 
   const load = useCallback(async () => {
     const { status, body } = await apiFetch("/api/state");
@@ -44,6 +47,15 @@ export default function OtherPage() {
       body: JSON.stringify({ text: testText }),
     });
     setTestResult(status === 200 ? body : { error: body?.error ?? status });
+  }
+
+  async function runProbe() {
+    setProbing(true);
+    setProbeResult(null);
+    const q = probeCoin.trim() ? `?coin=${encodeURIComponent(probeCoin.trim())}` : "";
+    const { status, body } = await apiFetch("/api/pionex/probe" + q);
+    setProbing(false);
+    setProbeResult(status === 200 ? body : { error: body?.error ?? status });
   }
 
   if (!authed) {
@@ -145,6 +157,27 @@ export default function OtherPage() {
             <Pager page={eventPage} total={(diag.events ?? []).length}
                    onPage={setEventPage} />
           </>
+        )}
+      </div>
+
+      <h2>Pionex 探測（查真實合約代碼格式）</h2>
+      <div className="panel">
+        <p className="hint">
+          真實下單若出現 <b>TRADE_INVALID_SYMBOL</b>，代表送出的合約代碼格式不對。
+          按下面的按鈕會從伺服器查 Pionex 公開清單裡實際的代碼字串（例如 BTC_USDT 或
+          BTC_USDT_PERP），看清楚後到「設定」頁把「合約代碼格式」改成對應樣板。
+        </p>
+        <input type="text" value={probeCoin}
+               onChange={(e) => setProbeCoin(e.target.value)}
+               placeholder="可填幣種過濾，例如 SOL（留空顯示 BTC/ETH/SOL 範例）" />
+        <button onClick={runProbe} disabled={probing}>
+          {probing ? "查詢中…" : "開始探測"}
+        </button>
+        {probeResult && (
+          <pre style={{ marginTop: 12, background: "var(--bg)", padding: 12,
+                        borderRadius: 6, overflowX: "auto", fontSize: 12 }}>
+            {JSON.stringify(probeResult, null, 2)}
+          </pre>
         )}
       </div>
 

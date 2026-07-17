@@ -74,6 +74,8 @@ export async function POST(req: NextRequest) {
       next.pionex.apiSecret = p.apiSecret.trim();
     if (typeof p.baseUrl === "string" && p.baseUrl)
       next.pionex.baseUrl = p.baseUrl.trim();
+    if (typeof p.symbolFormat === "string" && p.symbolFormat.includes("{base}"))
+      next.pionex.symbolFormat = p.symbolFormat.trim();
   }
   if (body.trading) next.trading = { ...next.trading, ...body.trading };
   if (body.filters) next.filters = { ...next.filters, ...body.filters };

@@ -18,6 +18,7 @@ export default function SettingsPage() {
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
   const [baseUrl, setBaseUrl] = useState("https://api.pionex.com");
+  const [symbolFormat, setSymbolFormat] = useState("{base}_{quote}_PERP");
   const [liveTrading, setLiveTrading] = useState(false);
   const [sizingMode, setSizingMode] = useState("fixed_usdt");
   const [fixedUsdt, setFixedUsdt] = useState(100);
@@ -59,6 +60,7 @@ export default function SettingsPage() {
     setApiKey(s.pionex.apiKey ?? "");
     setApiSecret(s.pionex.apiSecret ?? "");
     setBaseUrl(s.pionex.baseUrl ?? "https://api.pionex.com");
+    setSymbolFormat(s.pionex.symbolFormat ?? "{base}_{quote}_PERP");
     setLiveTrading(!!s.trading.liveTrading);
     setSizingMode(s.trading.sizing.mode);
     setFixedUsdt(s.trading.sizing.fixedUsdt);
@@ -102,7 +104,7 @@ export default function SettingsPage() {
           allowedChats: splitList(allowedChats),
           reactToEdits,
         },
-        pionex: { apiKey, apiSecret, baseUrl },
+        pionex: { apiKey, apiSecret, baseUrl, symbolFormat },
         trading: {
           liveTrading,
           sizing: {
@@ -214,6 +216,13 @@ export default function SettingsPage() {
         </div>
         <label>API Base URL</label>
         <input type="text" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
+        <label>
+          合約代碼格式（{"{base}"}=幣種、{"{quote}"}=計價幣）— 若下單出現
+          TRADE_INVALID_SYMBOL，用「其他」頁的 Pionex 探測查真實格式後改這裡
+        </label>
+        <input type="text" value={symbolFormat}
+               onChange={(e) => setSymbolFormat(e.target.value)}
+               placeholder="{base}_{quote}_PERP" />
       </div>
 
       <div className="panel">

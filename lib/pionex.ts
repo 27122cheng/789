@@ -56,12 +56,21 @@ export function signRequest(
   return createHmac("sha256", apiSecret).update(message).digest("hex");
 }
 
-export function toPerpSymbol(symbol: string): string {
+export function toPerpSymbol(
+  symbol: string,
+  format = "{base}_{quote}_PERP"
+): string {
   const s = symbol.toUpperCase().replace(/[-/_]/g, "");
-  for (const quote of ["USDT", "USDC", "BUSD", "USD"]) {
-    if (s.endsWith(quote)) return `${s.slice(0, -quote.length)}_${quote}_PERP`;
+  let base = s;
+  let quote = "USDT";
+  for (const q of ["USDT", "USDC", "BUSD", "USD"]) {
+    if (s.endsWith(q) && s.length > q.length) {
+      base = s.slice(0, -q.length);
+      quote = q;
+      break;
+    }
   }
-  return `${s}_USDT_PERP`;
+  return format.replace("{base}", base).replace("{quote}", quote);
 }
 
 export class PionexClient {
@@ -69,9 +78,15 @@ export class PionexClient {
     private apiKey: string,
     private apiSecret: string,
     private baseUrl: string = "https://api.pionex.com",
+    private symbolFormat: string = "{base}_{quote}_PERP",
     private paths: PionexPaths = DEFAULT_PATHS
   ) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
+  }
+
+  /** Normalized symbol ("BTCUSDT") -> Pionex contract symbol per config. */
+  perpSymbol(symbol: string): string {
+    return toPerpSymbol(symbol, this.symbolFormat);
   }
 
   private async request(

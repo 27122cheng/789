@@ -110,6 +110,11 @@ export interface Settings {
     apiKey: string;
     apiSecret: string;
     baseUrl: string;
+    // How a normalized symbol like "BTCUSDT" maps to Pionex's contract symbol.
+    // {base}=BTC, {quote}=USDT. Adjust to match what Pionex actually accepts
+    // (discover the real format via the Pionex 探測 tool on the 其他 page).
+    // Examples: "{base}_{quote}_PERP", "{base}_{quote}", "{base}{quote}"
+    symbolFormat: string;
   };
   trading: {
     liveTrading: boolean;
@@ -167,6 +172,7 @@ export const DEFAULT_SETTINGS: Settings = {
     apiKey: "",
     apiSecret: "",
     baseUrl: "https://api.pionex.com",
+    symbolFormat: "{base}_{quote}_PERP",
   },
   trading: {
     liveTrading: false,
