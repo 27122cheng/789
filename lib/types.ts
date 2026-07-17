@@ -18,12 +18,22 @@ export interface ParsedSignal {
   stopLossBreakeven: boolean;   // "移至保本/成本" style update_sl
   sizeUsdt: number | null;
   addLevels: number[];          // 加倉計劃 price levels from long-term signals
+  upgrade: boolean;             // 長線單升級信號: update existing position instead of rejecting
   rawText: string;
   chatId: string;
   messageId: number;
   editedFromId?: number;
   timestamp: number;            // unix ms
   warnings: string[];
+}
+
+/** One 加倉計劃 level with its pullback state machine:
+ *  price beyond the level for >= armSeconds arms it (virtual limit order);
+ *  the add then fills when price pulls back (回踩) to the level. */
+export interface PendingAdd {
+  level: number;
+  armedAt: number | null;  // when price was first seen beyond the level
+  armed: boolean;          // stayed beyond long enough -> waiting for pullback
 }
 
 export interface Position {
@@ -37,7 +47,7 @@ export interface Position {
   stopLoss: number | null;
   takeProfits: number[];       // remaining TP targets
   tpCountOriginal: number;
-  pendingAdds: number[];       // 加倉計劃 levels not yet reached
+  pendingAdds: PendingAdd[];   // 加倉計劃 levels not yet filled
   entryOrderType: "market" | "limit";
   beMoved: boolean;            // SL already moved to breakeven after TP1
   orderIds: string[];          // pending entry order ids (limit entries)
@@ -48,7 +58,7 @@ export interface Position {
 
 export interface OrderRecord {
   at: number;
-  action: SignalAction | "tp_hit" | "sl_hit" | "trailing_move";
+  action: SignalAction | "tp_hit" | "sl_hit" | "trailing_move" | "upgrade";
   symbol: string;
   side: string | null;
   sizeUsdt: number;
@@ -109,6 +119,8 @@ export interface Settings {
       percentBalance: number;
     };
     addPositionUsdt: number; // 加倉每次的名目 USDT，0 = 與主要 sizing 相同
+    // 加倉位掛單前，價格需越過該價位持續的秒數（之後回踩到位才成交）
+    addArmSeconds: number;
     leverage: { default: number; max: number };
     risk: {
       symbolWhitelist: string[];
@@ -160,12 +172,13 @@ export const DEFAULT_SETTINGS: Settings = {
     liveTrading: false,
     sizing: { mode: "fixed_usdt", fixedUsdt: 100, percentBalance: 5 },
     addPositionUsdt: 0,
+    addArmSeconds: 60,
     leverage: { default: 10, max: 20 },
     risk: {
       symbolWhitelist: [],
       symbolBlacklist: [],
       maxOpenPositions: 5,
-      maxAddsPerPosition: 2,
+      maxAddsPerPosition: 3,
       cooldownSeconds: 30,
       maxSignalAgeSeconds: 120,
       requireEntryAndSl: true,

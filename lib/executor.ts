@@ -17,6 +17,7 @@ import {
   checkAndMarkSeen,
   getCooldowns,
   getPositions,
+  purgeSymbolRecords,
   savePositions,
   setCooldown,
 } from "./store";
@@ -265,6 +266,13 @@ export async function handleIncomingMessage(
   // 3. dedup (covers Telegram redeliveries; edits get a new content digest)
   if (await checkAndMarkSeen(dedupKey(signal))) return;
 
+  // cancels run silently in the background: no signal/order records, and the
+  // cancelled trade's earlier records are purged from the logs
+  if (signal.action === "cancel") {
+    await executeSignal(signal, settings);
+    return;
+  }
+
   await appendSignal({
     at: Date.now(), chatId: meta.chatId, messageId: meta.messageId,
     action: signal.action, symbol: signal.symbol, side: signal.side,
@@ -290,6 +298,28 @@ export async function executeSignal(
   const cooldowns = await getCooldowns();
   const sym = signal.symbol;
   const pos = positions[sym];
+
+  // 長線單升級信號 for an already-open position: update its SL/TP and attach
+  // the 加倉計劃 instead of rejecting as a duplicate open.
+  if (signal.action === "open" && signal.upgrade && pos) {
+    const maxAdds = settings.trading.risk.maxAddsPerPosition;
+    if (signal.stopLoss != null) pos.stopLoss = signal.stopLoss;
+    if (signal.takeProfits.length) {
+      pos.takeProfits = [...signal.takeProfits].sort((a, b) =>
+        pos.side === "long" ? a - b : b - a);
+      pos.tpCountOriginal = Math.max(pos.tpCountOriginal, pos.takeProfits.length);
+    }
+    pos.pendingAdds = signal.addLevels
+      .slice(0, Math.max(0, maxAdds - pos.addCount))
+      .map((level) => ({ level, armedAt: null, armed: false }));
+    await savePositions(positions);
+    await record("upgrade",
+      { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: pos.qty, price: signal.stopLoss, leverage: pos.leverage },
+      live, true,
+      `長線單升級: SL=${signal.stopLoss ?? "unchanged"} TP=${signal.takeProfits.join("/") || "unchanged"}` +
+        (pos.pendingAdds.length ? ` 加倉位=${pos.pendingAdds.map((a) => a.level).join("/")}` : ""));
+    return;
+  }
 
   const reject = riskReject(settings, signal, positions, cooldowns);
   if (reject) {
@@ -333,7 +363,9 @@ export async function executeSignal(
                 signal.side === "long" ? a - b : b - a)
             : [],
           tpCountOriginal: signal.takeProfits.length,
-          pendingAdds: signal.addLevels.slice(0, maxAdds),
+          pendingAdds: signal.addLevels
+            .slice(0, maxAdds)
+            .map((level) => ({ level, armedAt: null, armed: false })),
           entryOrderType: limitPrice ? entryType : "market",
           beMoved: false,
           orderIds: res.orderIds,
@@ -387,28 +419,19 @@ export async function executeSignal(
       }
 
       case "cancel": {
-        let n = 0;
-        if (live) n = await client.cancelAllOrders(toPerpSymbol(sym));
-        let note = live
-          ? `cancelled ${n} open order(s)`
-          : "dry-run: pending orders cancelled";
+        // Silent background handling: cancel exchange orders / drop or close
+        // the tracked position, purge the trade's earlier signal & order
+        // records, and record nothing new.
+        if (live) await client.cancelAllOrders(toPerpSymbol(sym));
         if (pos) {
-          if (pos.entryOrderType === "limit") {
-            // pending limit entry -> the trade idea is void, drop the tracker
-            delete positions[sym];
-            note += "; pending limit entry removed from tracker";
-          } else {
+          if (pos.entryOrderType !== "limit") {
             // market entry already filled -> cancelling the idea means exiting
-            const ids = await closeQty(client, live, pos, pos.qty);
-            delete positions[sym];
-            note += "; market position closed (trade idea cancelled)";
-            if (ids.length) note += ` [${ids.join(",")}]`;
+            await closeQty(client, live, pos, pos.qty);
           }
+          delete positions[sym];
         }
         await savePositions(positions);
-        await record("cancel",
-          { symbol: sym, side: pos?.side ?? null, sizeUsdt: pos?.sizeUsdt ?? 0, qty: pos?.qty ?? 0, price: null, leverage: pos?.leverage ?? 0 },
-          live, true, note);
+        await purgeSymbolRecords(sym);
         return;
       }
 
@@ -504,19 +527,50 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
       }
     }
 
-    // 加倉計劃: execute a planned add when price reaches the level from the
-    // entry side (works for pyramiding levels and averaging-down levels alike)
-    const pending = pos.pendingAdds ?? [];
-    while (pending.length) {
-      const level = pending[0];
-      const reached =
-        level < pos.entryPrice ? price <= level : price >= level;
-      if (!reached) break;
-      pending.shift();
-      if (pos.addCount >= settings.trading.risk.maxAddsPerPosition) {
-        actions.push(`${sym}: add level ${level} reached but max adds used, skipped`);
-        changed = true;
+    // 加倉計劃 with pullback entries: once price stays beyond a level for
+    // addArmSeconds, the level is "armed" (a virtual limit order at the
+    // level); the add then fills when price pulls back (回踩) to the level.
+    // Tolerates legacy stored positions where levels were plain numbers.
+    const armSeconds = settings.trading.addArmSeconds ?? 60;
+    const now = Date.now();
+    const pending = (pos.pendingAdds ?? []).map((a: any) =>
+      typeof a === "number" ? { level: a, armedAt: null, armed: false } : a
+    );
+    const remaining: typeof pending = [];
+    for (const add of pending) {
+      const beyond =
+        add.level < pos.entryPrice ? price <= add.level : price >= add.level;
+      const pulledBack =
+        add.level < pos.entryPrice ? price >= add.level : price <= add.level;
+
+      if (!add.armed) {
+        if (beyond) {
+          if (add.armedAt == null) {
+            add.armedAt = now;
+            changed = true;
+          }
+          if (now - add.armedAt >= armSeconds * 1000) {
+            add.armed = true;
+            changed = true;
+            actions.push(`${sym}: add level ${add.level} armed (beyond ${armSeconds}s), waiting for pullback`);
+          }
+        } else if (add.armedAt != null) {
+          add.armedAt = null; // bounced back before the arm window elapsed
+          changed = true;
+        }
+        remaining.push(add);
         continue;
+      }
+
+      // armed: fill when price pulls back to the level
+      if (!pulledBack) {
+        remaining.push(add);
+        continue;
+      }
+      if (pos.addCount >= settings.trading.risk.maxAddsPerPosition) {
+        actions.push(`${sym}: add level ${add.level} pullback but max adds used, dropped`);
+        changed = true;
+        continue; // drop the level
       }
       const addUsdt =
         settings.trading.addPositionUsdt > 0
@@ -525,7 +579,7 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
       try {
         const res = await placeEntry(
           client, live && !pos.dryRun, sym, pos.side, addUsdt,
-          "market", null, price
+          "market", null, add.level
         );
         const newQty = pos.qty + res.qty;
         pos.entryPrice = (pos.entryPrice * pos.qty + res.price * res.qty) / newQty;
@@ -534,18 +588,17 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
         pos.sizeUsdt += addUsdt;
         pos.addCount += 1;
         changed = true;
-        actions.push(`${sym}: planned add at ${level} executed (${addUsdt} USDT)`);
+        actions.push(`${sym}: 回踩加倉 at ${add.level} executed (${addUsdt} USDT)`);
         await record("add",
           { symbol: sym, side: pos.side, sizeUsdt: addUsdt, qty: res.qty, price: res.price, leverage: pos.leverage },
           live && !pos.dryRun, true,
-          `加倉計劃 level ${level} reached at ${price}; ${res.note}`, res.orderIds);
+          `加倉計劃 回踩成交 @ ${add.level} (現價 ${price}); ${res.note}`, res.orderIds);
       } catch (err) {
-        pending.unshift(level); // retry next tick
+        remaining.push(add); // retry next tick
         actions.push(`${sym}: planned add FAILED: ${(err as Error).message}`);
-        break;
       }
     }
-    pos.pendingAdds = pending;
+    pos.pendingAdds = remaining;
 
     // stop-loss: close everything
     if (pos.stopLoss != null && (price - pos.stopLoss) * dir <= 0) {

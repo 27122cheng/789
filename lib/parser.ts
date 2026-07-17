@@ -53,6 +53,9 @@ const MOVE_VERBS = [
   "更新", "move", "moved", "update", "updated", "raise", "lower", "set to",
   "adjust", "trail",
 ];
+// 長線單升級信號: a short-term trade being upgraded to long-term -> update
+// the existing position's SL/TP and attach the 加倉計劃 instead of opening anew
+const UPGRADE_MARKERS = /長線單升級|长线单升级|升級信號|升级信号|升級為長線|升级为长线/;
 // unmistakable "adjust the stop" phrasing used by signal bots
 const SL_ADJUST_MARKERS =
   /新止損|新止损|建議止損調整|建议止损调整|追蹤止損|追踪止损|移動止損|移动止损/;
@@ -322,6 +325,7 @@ export function parseSignal(
     stopLossBreakeven: breakeven,
     sizeUsdt: extractSize(norm),
     addLevels: action === "open" ? extractAddLevels(norm) : [],
+    upgrade: action === "open" && UPGRADE_MARKERS.test(norm),
     rawText: text,
     chatId: meta.chatId,
     messageId: meta.messageId,

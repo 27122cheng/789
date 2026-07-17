@@ -36,7 +36,7 @@ export async function GET(req: NextRequest) {
       pionexKeys: !!settings.pionex.apiKey && !!settings.pionex.apiSecret,
     },
     positions,
-    signals: signals.slice(0, 50),
-    orders: orders.slice(0, 50),
+    signals: signals.slice(0, 100),
+    orders: orders.slice(0, 100),
   });
 }

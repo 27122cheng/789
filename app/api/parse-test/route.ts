@@ -69,6 +69,7 @@ export async function POST(req: NextRequest) {
       stopLoss: signal.stopLoss,
       stopLossBreakeven: signal.stopLossBreakeven,
       addLevels: signal.addLevels,
+      upgrade: signal.upgrade,
       sizeUsdt: signal.sizeUsdt,
     },
     warnings: signal.warnings,

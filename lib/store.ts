@@ -26,7 +26,8 @@ const K_ADMIN_HASH = KEY_PREFIX + "adminPasswordHash";
 const K_CRON_SECRET = KEY_PREFIX + "cronSecret";
 const K_WEBHOOK_EVENTS = KEY_PREFIX + "webhookEvents";
 
-const MAX_LOG = 200;
+// 10 pages x 10 rows in the UI; oldest entries beyond this are dropped
+const MAX_LOG = 100;
 const MAX_WEBHOOK_EVENTS = 50;
 
 // Built-in fallback credentials (owner's Upstash database) so the app works
@@ -127,6 +128,15 @@ export async function appendOrder(record: OrderRecord): Promise<void> {
 
 export async function getOrders(): Promise<OrderRecord[]> {
   return (await kvGet<OrderRecord[]>(K_ORDERS)) ?? [];
+}
+
+/** Removes every signal and order record for a symbol - used when a trade
+ *  idea is cancelled so its history disappears from the logs entirely. */
+export async function purgeSymbolRecords(symbol: string): Promise<void> {
+  const signals = (await kvGet<SignalRecord[]>(K_SIGNALS)) ?? [];
+  await kvSet(K_SIGNALS, signals.filter((s) => s.symbol !== symbol));
+  const orders = (await kvGet<OrderRecord[]>(K_ORDERS)) ?? [];
+  await kvSet(K_ORDERS, orders.filter((o) => o.symbol !== symbol));
 }
 
 // --------------------------------------------- raw webhook diagnostic log

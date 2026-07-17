@@ -143,14 +143,21 @@ describe("dry-run pipeline", () => {
     expect(positions["BTCUSDT"]).toBeUndefined();
   });
 
-  it("cancel clears tracked pending orders", async () => {
+  it("cancel runs silently and purges the trade's records", async () => {
     const cfg = settings();
     cfg.trading.risk.cooldownSeconds = 0;
     await handleIncomingMessage("SOLUSDT LONG 5x Entry: 150 SL: 140", meta(), cfg);
+    expect((await getPositions())["SOLUSDT"]).toBeDefined();
+    expect((await getOrders()).some((o) => o.symbol === "SOLUSDT")).toBe(true);
+    expect((await getSignals()).some((s) => s.symbol === "SOLUSDT")).toBe(true);
+
     await handleIncomingMessage("取消 SOLUSDT 掛單", meta(), cfg);
-    const orders = await getOrders();
-    expect(orders[0].action).toBe("cancel");
-    expect(orders[0].success).toBe(true);
+
+    // position removed, and no trace left in either log (silent background)
+    expect((await getPositions())["SOLUSDT"]).toBeUndefined();
+    expect((await getOrders()).some((o) => o.symbol === "SOLUSDT")).toBe(false);
+    expect((await getSignals()).some((s) => s.symbol === "SOLUSDT")).toBe(false);
+    expect((await getOrders()).some((o) => o.action === "cancel")).toBe(false);
   });
 });
 
@@ -164,31 +171,87 @@ describe("加密掃描 Pro pipeline behaviours", () => {
  🥇 加倉 1： $0.00110614
  🥈 加倉 2： $0.00103314`;
 
-  it("executes planned add levels when price reaches them", async () => {
+  it("arms add levels beyond the price, then fills on the pullback (回踩)", async () => {
     const cfg = settings();
     cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.addArmSeconds = 0; // arm immediately in tests
     await handleIncomingMessage(LONG_TERM, meta(), cfg);
     let positions = await getPositions();
     let pos = positions["ONEUSDT"];
     expect(pos).toBeDefined();
     expect(pos.side).toBe("short");
-    expect(pos.pendingAdds).toEqual([0.00110614, 0.00103314]);
+    expect(pos.pendingAdds.map((a) => a.level)).toEqual([0.00110614, 0.00103314]);
 
-    // price falls to the first add level -> planned add executes
+    // price falls beyond the first add level -> level arms, no fill yet
     stubFetchPrice(0.0011);
     await monitorTick(cfg);
     positions = await getPositions();
     pos = positions["ONEUSDT"];
-    expect(pos.addCount).toBe(1);
-    expect(pos.pendingAdds).toEqual([0.00103314]);
+    expect(pos.addCount).toBe(0);
+    expect(pos.pendingAdds[0].armed).toBe(true);
 
-    // falls through the second level too
-    stubFetchPrice(0.00103);
+    // price pulls back up to the level -> add fills
+    stubFetchPrice(0.00111);
     await monitorTick(cfg);
     positions = await getPositions();
     pos = positions["ONEUSDT"];
-    expect(pos.addCount).toBe(2);
-    expect(pos.pendingAdds).toEqual([]);
+    expect(pos.addCount).toBe(1);
+    expect(pos.pendingAdds.map((a) => a.level)).toEqual([0.00103314]);
+  });
+
+  it("bounce back before the arm window resets the timer (no fill)", async () => {
+    const cfg = settings();
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.addArmSeconds = 3600; // impossible to arm within the test
+    await handleIncomingMessage(
+      LONG_TERM.replace("ONE/USDT", "TWO/USDT"), meta(), cfg
+    );
+    stubFetchPrice(0.0011); // beyond -> timer starts, not armed yet
+    await monitorTick(cfg);
+    stubFetchPrice(0.00115); // bounced back before arming -> reset
+    await monitorTick(cfg);
+    const pos = (await getPositions())["TWOUSDT"];
+    expect(pos.addCount).toBe(0);
+    expect(pos.pendingAdds[0].armed).toBe(false);
+    expect(pos.pendingAdds[0].armedAt).toBeNull();
+  });
+
+  it("長線單升級信號 updates SL/TP and attaches the add plan to an existing position", async () => {
+    const cfg = settings();
+    cfg.trading.risk.cooldownSeconds = 0;
+    // short-term open first
+    await handleIncomingMessage(
+      `🚨 加密掃描 Pro — 短線單信號
+▼ 做空（Short）：APE/USDT
+📍 進場： $1.00
+🛑 止損： $1.05
+🎯 止盈一： $0.95`,
+      meta(), cfg
+    );
+    let pos = (await getPositions())["APEUSDT"];
+    expect(pos).toBeDefined();
+    expect(pos.stopLoss).toBe(1.05);
+
+    // upgrade arrives for the same symbol -> update, not duplicate-reject
+    await handleIncomingMessage(
+      `🔼 加密掃描 Pro — 長線單升級信號
+▼ 做空（Short）：APE/USDT
+📍 進場： $1.00
+🛑 止損： $1.02
+🏁 最終止盈： $0.80
+💰 加倉計劃（2 次）
+ 🥇 加倉 1： $0.93
+ 🥈 加倉 2： $0.88`,
+      meta(), cfg
+    );
+    pos = (await getPositions())["APEUSDT"];
+    expect(pos.stopLoss).toBe(1.02);
+    expect(pos.takeProfits).toEqual([0.8]);
+    expect(pos.pendingAdds.map((a) => a.level)).toEqual([0.93, 0.88]);
+
+    const orders = await getOrders();
+    expect(orders[0].action).toBe("upgrade");
+    expect(orders[0].success).toBe(true);
   });
 
   it("moves SL near entry after TP1 is hit", async () => {
