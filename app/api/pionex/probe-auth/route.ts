@@ -14,19 +14,25 @@ import { signRequest } from "@/lib/pionex";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+// The namespace is confirmed: /api/v1/trade/* + type=PERP. Now probe the
+// read-only openOrders endpoint with different symbol formats and type
+// placements to find the exact combination the trade API accepts (whichever
+// returns result:true is the format the order endpoint wants). All GET/safe.
 // [path, extraQueryParams]
 const CANDIDATES: [string, Record<string, string>][] = [
-  ["/api/v1/account/balances", {}],
+  // baseline account reads
   ["/api/v1/account/balances", { type: "PERP" }],
-  ["/api/v1/futures/balances", {}],
-  ["/api/v1/futures/account", {}],
-  ["/api/v1/futures/positions", {}],
-  ["/api/v1/account/positions", { type: "PERP" }],
-  ["/api/v1/futures/openOrders", { symbol: "BTC_USDT_PERP" }],
+  // symbol-format variations on openOrders
   ["/api/v1/trade/openOrders", { symbol: "BTC_USDT_PERP", type: "PERP" }],
-  ["/api/v1/futures/trade/openOrders", { symbol: "BTC_USDT_PERP" }],
-  ["/api/v1/perpetual/positions", {}],
-  ["/api/v1/contract/positions", {}],
+  ["/api/v1/trade/openOrders", { symbol: "BTC_USDT", type: "PERP" }],
+  ["/api/v1/trade/openOrders", { symbol: "BTC_USDT_PERP" }],
+  ["/api/v1/trade/openOrders", { symbol: "BTCUSDT", type: "PERP" }],
+  ["/api/v1/trade/openOrders", { symbol: "BTC-USDT-PERP", type: "PERP" }],
+  ["/api/v1/trade/allOrders", { symbol: "BTC_USDT_PERP", type: "PERP", limit: "1" }],
+  // positions under the trade/account namespace
+  ["/api/v1/trade/positions", { type: "PERP" }],
+  ["/api/v1/account/positions", { type: "PERP" }],
+  ["/api/v1/trade/position", { symbol: "BTC_USDT_PERP", type: "PERP" }],
 ];
 
 export async function GET(req: NextRequest) {
@@ -58,11 +64,20 @@ export async function GET(req: NextRequest) {
         cache: "no-store",
       });
       const text = await r.text();
+      let parsed: any = null;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        /* not json */
+      }
       results.push({
         path,
         query: extra,
         status: r.status,
-        snippet: text.slice(0, 220),
+        result: parsed?.result ?? null,
+        code: parsed?.code ?? null,
+        message: parsed?.message ?? parsed?.error_msg ?? null,
+        snippet: parsed ? undefined : text.slice(0, 160),
       });
     } catch (e) {
       results.push({ path, query: extra, error: (e as Error).message });
@@ -72,8 +87,8 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({
     baseUrl: base,
     note:
-      "找 status=200 且回傳看起來像帳戶/持倉/掛單資料的那個 path，" +
-      "就是永續合約的正確命名空間。把這個結果截圖回報即可（不含金鑰，安全）。",
+      "看哪一列 result=true —— 那個 symbol 格式 + type 位置就是交易端點要的。" +
+      "若全部 result=false，把每列的 code/message 截圖回報即可（不含金鑰，安全）。",
     results,
   });
 }
