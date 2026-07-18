@@ -21,6 +21,8 @@ export default function OtherPage() {
   const [probeCoin, setProbeCoin] = useState("");
   const [probeResult, setProbeResult] = useState<any>(null);
   const [probing, setProbing] = useState(false);
+  const [authProbeResult, setAuthProbeResult] = useState<any>(null);
+  const [authProbing, setAuthProbing] = useState(false);
 
   const load = useCallback(async () => {
     const { status, body } = await apiFetch("/api/state");
@@ -56,6 +58,14 @@ export default function OtherPage() {
     const { status, body } = await apiFetch("/api/pionex/probe" + q);
     setProbing(false);
     setProbeResult(status === 200 ? body : { error: body?.error ?? status });
+  }
+
+  async function runAuthProbe() {
+    setAuthProbing(true);
+    setAuthProbeResult(null);
+    const { status, body } = await apiFetch("/api/pionex/probe-auth");
+    setAuthProbing(false);
+    setAuthProbeResult(status === 200 ? body : { error: body?.error ?? status });
   }
 
   if (!authed) {
@@ -177,6 +187,24 @@ export default function OtherPage() {
           <pre style={{ marginTop: 12, background: "var(--bg)", padding: 12,
                         borderRadius: 6, overflowX: "auto", fontSize: 12 }}>
             {JSON.stringify(probeResult, null, 2)}
+          </pre>
+        )}
+      </div>
+
+      <h2>Pionex 探測（已登入・找合約下單端點）</h2>
+      <div className="panel">
+        <p className="hint">
+          若真實下單一直出現 TRADE_INVALID_SYMBOL，按這裡。它會用你的金鑰以
+          <b>唯讀 GET</b> 試探幾個可能的合約帳戶/持倉端點（<b>不會下任何單，安全</b>），
+          找出永續合約的正確 API 路徑。把結果截圖回報即可（結果不含金鑰）。
+        </p>
+        <button onClick={runAuthProbe} disabled={authProbing}>
+          {authProbing ? "查詢中…" : "開始已登入探測"}
+        </button>
+        {authProbeResult && (
+          <pre style={{ marginTop: 12, background: "var(--bg)", padding: 12,
+                        borderRadius: 6, overflowX: "auto", fontSize: 12 }}>
+            {JSON.stringify(authProbeResult, null, 2)}
           </pre>
         )}
       </div>
