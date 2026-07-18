@@ -79,6 +79,10 @@ export class PionexClient {
     private apiSecret: string,
     private baseUrl: string = "https://api.pionex.com",
     private symbolFormat: string = "{base}_{quote}_PERP",
+    // Pionex uses ?type=PERP to select the perpetual market (vs spot) on its
+    // symbol/ticker/trade endpoints. Without it, a *_PERP symbol is rejected
+    // as TRADE_INVALID_SYMBOL because the request defaults to spot.
+    private marketType: string = "PERP",
     private paths: PionexPaths = DEFAULT_PATHS
   ) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
@@ -99,6 +103,8 @@ export class PionexClient {
       ...params,
       timestamp: String(Date.now()),
     };
+    // Select the perpetual market on every request (see marketType above).
+    if (this.marketType) allParams.type = this.marketType;
     const bodyStr = body !== undefined ? JSON.stringify(body) : undefined;
     const signature = signRequest(this.apiSecret, method, path, allParams, bodyStr);
 
