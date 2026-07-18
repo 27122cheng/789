@@ -34,7 +34,10 @@ INGEST_URL = os.getenv("INGEST_URL", "").strip()
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "123456789").strip()
 WATCH_CHATS = [c.strip().lstrip("@") for c in os.getenv("WATCH_CHATS", "").split(",") if c.strip()]
 PORT = int(os.getenv("PORT", "8080"))
-SESSION_FILE = os.getenv("SESSION_FILE", "user_session")
+# Login is stored as a portable StringSession so hosts without a persistent
+# disk survive restarts: after logging in once, copy the shown session string
+# into a SESSION_STRING env var and you never have to log in again.
+SESSION_STRING = os.getenv("SESSION_STRING", "").strip()
 
 # in-memory login/runtime state
 state = {
@@ -45,7 +48,19 @@ state = {
     "forwarded": 0,
     "last": "",
     "error": "",
+    "session_string": "",
 }
+
+
+def make_client(api_id: int, api_hash: str) -> TelegramClient:
+    return TelegramClient(StringSession(SESSION_STRING), api_id, api_hash)
+
+
+def remember_session(client: TelegramClient) -> None:
+    try:
+        state["session_string"] = client.session.save()
+    except Exception:  # noqa: BLE001
+        state["session_string"] = ""
 
 
 def page(body: str) -> web.Response:
@@ -70,6 +85,15 @@ def page(body: str) -> web.Response:
 def status_body() -> str:
     watched = ", ".join(WATCH_CHATS) if WATCH_CHATS else "所有頻道與群組"
     err = f'<p class="err">錯誤：{html.escape(state["error"])}</p>' if state["error"] else ""
+    sess = state.get("session_string") or ""
+    persist = ""
+    if sess and not SESSION_STRING:
+        persist = f"""<div class="panel">
+  <p class="ok">🔑 讓重開機後免再登入：把下面這段設成主機的環境變數
+  <code>SESSION_STRING</code>（設好後重新部署一次即可）。</p>
+  <textarea readonly rows="3" style="width:100%;font-size:11px">{html.escape(sess)}</textarea>
+  <p class="hint">這段等同你的登入憑證，請勿外流。</p>
+</div>"""
     return f"""<h1>✅ 已登入，監聽中</h1>
 <div class="panel">
   <p class="ok">帳號已登入，正在監聽並轉發信號。</p>
@@ -79,6 +103,7 @@ def status_body() -> str:
   <p class="hint">轉發目標：{html.escape(INGEST_URL) or '⚠️ 尚未設定 INGEST_URL'}</p>
   {err}
 </div>
+{persist}
 <div class="panel hint">這個頁面開著或關掉都不影響，程式在背景持續運作。
 關掉整個程式（或主機停機）才會停止監聽。</div>"""
 
@@ -131,7 +156,7 @@ async def handle_start(request):
         phone = str(data.get("phone", "")).strip()
         if not (api_id and api_hash and phone):
             raise ValueError("api_id / api_hash / 手機號都要填")
-        client = TelegramClient(SESSION_FILE, api_id, api_hash)
+        client = make_client(api_id, api_hash)
         await client.connect()
         sent = await client.send_code_request(phone)
         state.update(client=client, phone=phone, phone_code_hash=sent.phone_code_hash)
@@ -156,6 +181,7 @@ async def handle_code(request):
             await client.sign_in(password=password)
         state["authorized"] = True
         state["phone_code_hash"] = None
+        remember_session(client)
         await start_watching(client)
     except web.HTTPFound:
         raise
@@ -216,16 +242,17 @@ async def start_watching(client: TelegramClient):
 
 
 async def try_resume_session():
-    """On startup, if a saved session exists, resume without asking to log in."""
+    """On startup, resume from SESSION_STRING (+ api creds) with no re-login."""
     api_id = os.getenv("TELEGRAM_API_ID", "").strip()
     api_hash = os.getenv("TELEGRAM_API_HASH", "").strip()
-    if not (api_id and api_hash):
-        return  # no env creds; user will log in via the web form
+    if not (SESSION_STRING and api_id and api_hash):
+        return  # not fully configured; user will log in via the web form
     try:
-        client = TelegramClient(SESSION_FILE, int(api_id), api_hash)
+        client = make_client(int(api_id), api_hash)
         await client.connect()
         if await client.is_user_authorized():
             state.update(client=client, authorized=True)
+            remember_session(client)
             await start_watching(client)
     except Exception as e:  # noqa: BLE001
         state["error"] = str(e)

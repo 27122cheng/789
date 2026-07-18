@@ -3,6 +3,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py .
-# Persist the Telegram session across restarts if the host gives a volume at /data
-ENV SESSION_FILE=/data/user_session
+# Login persists via the SESSION_STRING env var (shown on the status page
+# after first login), so no disk volume is needed - restarts stay logged in.
 CMD ["python", "app.py"]
