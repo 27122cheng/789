@@ -78,7 +78,13 @@ export async function getSettings(): Promise<Settings> {
   const stored = await kvGet<Partial<Settings>>(K_SETTINGS);
   if (!stored) return structuredClone(DEFAULT_SETTINGS);
   // deep-merge over defaults so newly added fields get sane values
-  return deepMerge(structuredClone(DEFAULT_SETTINGS), stored) as Settings;
+  const merged = deepMerge(structuredClone(DEFAULT_SETTINGS), stored) as Settings;
+  // migrate the old perp symbol format: Pionex's trade endpoint rejects the
+  // _PERP suffix (it wants base_quote + type=PERP), so drop a trailing _PERP.
+  if (/_PERP$/i.test(merged.pionex.symbolFormat)) {
+    merged.pionex.symbolFormat = merged.pionex.symbolFormat.replace(/_PERP$/i, "");
+  }
+  return merged;
 }
 
 export async function saveSettings(settings: Settings): Promise<void> {

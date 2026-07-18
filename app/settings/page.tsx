@@ -18,7 +18,7 @@ export default function SettingsPage() {
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
   const [baseUrl, setBaseUrl] = useState("https://api.pionex.com");
-  const [symbolFormat, setSymbolFormat] = useState("{base}_{quote}_PERP");
+  const [symbolFormat, setSymbolFormat] = useState("{base}_{quote}");
   const [liveTrading, setLiveTrading] = useState(false);
   const [sizingMode, setSizingMode] = useState("fixed_usdt");
   const [fixedUsdt, setFixedUsdt] = useState(100);
@@ -60,7 +60,7 @@ export default function SettingsPage() {
     setApiKey(s.pionex.apiKey ?? "");
     setApiSecret(s.pionex.apiSecret ?? "");
     setBaseUrl(s.pionex.baseUrl ?? "https://api.pionex.com");
-    setSymbolFormat(s.pionex.symbolFormat ?? "{base}_{quote}_PERP");
+    setSymbolFormat(s.pionex.symbolFormat ?? "{base}_{quote}");
     setLiveTrading(!!s.trading.liveTrading);
     setSizingMode(s.trading.sizing.mode);
     setFixedUsdt(s.trading.sizing.fixedUsdt);
@@ -222,7 +222,7 @@ export default function SettingsPage() {
         </label>
         <input type="text" value={symbolFormat}
                onChange={(e) => setSymbolFormat(e.target.value)}
-               placeholder="{base}_{quote}_PERP" />
+               placeholder="{base}_{quote}" />
       </div>
 
       <div className="panel">

@@ -36,15 +36,16 @@ describe("request signing", () => {
 });
 
 describe("toPerpSymbol", () => {
-  it("converts normalized symbols with the default format", () => {
-    expect(toPerpSymbol("BTCUSDT")).toBe("BTC_USDT_PERP");
-    expect(toPerpSymbol("eth-usdt")).toBe("ETH_USDT_PERP");
-    expect(toPerpSymbol("SOL/USDC")).toBe("SOL_USDC_PERP");
-    expect(toPerpSymbol("DOGE")).toBe("DOGE_USDT_PERP");
+  it("converts normalized symbols with the default (Pionex perp trade) format", () => {
+    // Pionex perp trade symbol = base_quote (no _PERP), market via type=PERP
+    expect(toPerpSymbol("BTCUSDT")).toBe("BTC_USDT");
+    expect(toPerpSymbol("eth-usdt")).toBe("ETH_USDT");
+    expect(toPerpSymbol("SOL/USDC")).toBe("SOL_USDC");
+    expect(toPerpSymbol("DOGE")).toBe("DOGE_USDT");
   });
 
   it("honours a configurable format", () => {
-    expect(toPerpSymbol("BTCUSDT", "{base}_{quote}")).toBe("BTC_USDT");
+    expect(toPerpSymbol("BTCUSDT", "{base}_{quote}_PERP")).toBe("BTC_USDT_PERP");
     expect(toPerpSymbol("BTCUSDT", "{base}{quote}")).toBe("BTCUSDT");
     expect(toPerpSymbol("SOLUSDT", "{base}-{quote}-SWAP")).toBe("SOL-USDT-SWAP");
   });

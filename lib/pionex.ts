@@ -58,7 +58,7 @@ export function signRequest(
 
 export function toPerpSymbol(
   symbol: string,
-  format = "{base}_{quote}_PERP"
+  format = "{base}_{quote}"
 ): string {
   const s = symbol.toUpperCase().replace(/[-/_]/g, "");
   let base = s;
@@ -78,7 +78,7 @@ export class PionexClient {
     private apiKey: string,
     private apiSecret: string,
     private baseUrl: string = "https://api.pionex.com",
-    private symbolFormat: string = "{base}_{quote}_PERP",
+    private symbolFormat: string = "{base}_{quote}",
     // Pionex uses ?type=PERP to select the perpetual market (vs spot) on its
     // symbol/ticker/trade endpoints. Without it, a *_PERP symbol is rejected
     // as TRADE_INVALID_SYMBOL because the request defaults to spot.
@@ -144,11 +144,16 @@ export class PionexClient {
     return usdt ? parseFloat(usdt.free ?? "0") : 0;
   }
 
-  /** Public endpoint - price of e.g. BTC_USDT_PERP. */
+  /** Price via market/tickers. `symbol` is the trade symbol (e.g. BTC_USDT);
+   *  perp tickers are LISTED with a _PERP suffix, so query that form. */
   async getPrice(symbol: string): Promise<number> {
-    const payload = await this.request("GET", this.paths.tickers, { symbol });
+    const tickerSym =
+      this.marketType === "PERP" && !/_PERP$/i.test(symbol)
+        ? `${symbol}_PERP`
+        : symbol;
+    const payload = await this.request("GET", this.paths.tickers, { symbol: tickerSym });
     const tickers: any[] = payload?.data?.tickers ?? [];
-    if (!tickers.length) throw new PionexApiError(`no ticker for ${symbol}`);
+    if (!tickers.length) throw new PionexApiError(`no ticker for ${tickerSym}`);
     return parseFloat(tickers[0].close);
   }
 
