@@ -10,7 +10,12 @@
  * stop orders - but it is only as granular as how often the monitor runs.
  */
 import { parseSignal, dedupKey, isFiltered } from "./parser";
-import { PionexApiError, PionexClient } from "./pionex";
+import {
+  PionexApiError,
+  PionexClient,
+  ceilToDecimals,
+  floorToDecimals,
+} from "./pionex";
 import {
   appendOrder,
   appendSignal,
@@ -114,6 +119,25 @@ async function fetchPriceSafe(
   }
 }
 
+/** Align signal prices to Pionex's price precision per the user's rule:
+ *  entry & stop-loss round UP (無條件進位), take-profits round DOWN (無條件縮減).
+ *  If the precision can't be determined, values are left unchanged. */
+async function alignPrices(
+  client: PionexClient,
+  symbol: string,
+  p: { entry?: number | null; stopLoss?: number | null; takeProfits?: number[] }
+): Promise<{ entry: number | null; stopLoss: number | null; takeProfits: number[] }> {
+  const dec = await client.pricePrecision(client.perpSymbol(symbol));
+  const up = (v: number | null | undefined) =>
+    v == null ? null : dec == null ? v : ceilToDecimals(v, dec);
+  const down = (v: number) => (dec == null ? v : floorToDecimals(v, dec));
+  return {
+    entry: up(p.entry),
+    stopLoss: up(p.stopLoss),
+    takeProfits: (p.takeProfits ?? []).map(down),
+  };
+}
+
 // -------------------------------------------------------------- risk gates
 function riskReject(
   settings: Settings,
@@ -170,7 +194,7 @@ async function placeEntry(
   const perp = client.perpSymbol(symbol);
   const price = limitPrice ?? refPrice;
   if (!price || price <= 0) throw new Error(`no price available for ${symbol}`);
-  const qty = sizeUsdt / price;
+  let qty = sizeUsdt / price;
 
   if (!live) {
     return {
@@ -181,12 +205,16 @@ async function placeEntry(
     };
   }
 
+  // round quantity DOWN to Pionex's base precision so we never exceed size
+  const baseDec = await client.basePrecision(symbol);
+  const qtyStr = baseDec == null ? qty.toFixed(6) : floorToDecimals(qty, baseDec).toFixed(baseDec);
+
   const apiSide = side === "long" ? "BUY" : "SELL";
   let resp: Record<string, any>;
   if (entryType === "limit" && limitPrice) {
     resp = await client.placeOrder({
       symbol: perp, side: apiSide, type: "LIMIT",
-      size: qty.toFixed(6), price: String(limitPrice),
+      size: qtyStr, price: String(limitPrice),
     });
   } else if (apiSide === "BUY") {
     resp = await client.placeOrder({
@@ -194,7 +222,7 @@ async function placeEntry(
     });
   } else {
     resp = await client.placeOrder({
-      symbol: perp, side: apiSide, type: "MARKET", size: qty.toFixed(6),
+      symbol: perp, side: apiSide, type: "MARKET", size: qtyStr,
     });
   }
   const oid = String(resp?.data?.orderId ?? "");
@@ -304,9 +332,13 @@ export async function executeSignal(
   // the 加倉計劃 instead of rejecting as a duplicate open.
   if (signal.action === "open" && signal.upgrade && pos) {
     const maxAdds = settings.trading.risk.maxAddsPerPosition;
-    if (signal.stopLoss != null) pos.stopLoss = signal.stopLoss;
-    if (signal.takeProfits.length) {
-      pos.takeProfits = [...signal.takeProfits].sort((a, b) =>
+    const aligned = await alignPrices(client, sym, {
+      stopLoss: signal.stopLoss,
+      takeProfits: signal.takeProfits,
+    });
+    if (aligned.stopLoss != null) pos.stopLoss = aligned.stopLoss;
+    if (aligned.takeProfits.length) {
+      pos.takeProfits = [...aligned.takeProfits].sort((a, b) =>
         pos.side === "long" ? a - b : b - a);
       pos.tpCountOriginal = Math.max(pos.tpCountOriginal, pos.takeProfits.length);
     }
@@ -315,9 +347,9 @@ export async function executeSignal(
       .map((level) => ({ level, armedAt: null, armed: false }));
     await savePositions(positions);
     await record("upgrade",
-      { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: pos.qty, price: signal.stopLoss, leverage: pos.leverage },
+      { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: pos.qty, price: aligned.stopLoss, leverage: pos.leverage },
       live, true,
-      `長線單升級: SL=${signal.stopLoss ?? "unchanged"} TP=${signal.takeProfits.join("/") || "unchanged"}` +
+      `長線單升級: SL=${aligned.stopLoss ?? "unchanged"} TP=${aligned.takeProfits.join("/") || "unchanged"}` +
         (pos.pendingAdds.length ? ` 加倉位=${pos.pendingAdds.map((a) => a.level).join("/")}` : ""));
     return;
   }
@@ -341,10 +373,16 @@ export async function executeSignal(
         }
         const leverage = computeLeverage(settings, signal);
         const sizeUsdt = await computeSizeUsdt(settings, signal, client, live, false);
-        const refPrice = await fetchPriceSafe(client, sym, signal.entryPrice);
+        // align signal prices to Pionex precision: entry/SL up, TP down
+        const aligned = await alignPrices(client, sym, {
+          entry: signal.entryPrice,
+          stopLoss: signal.stopLoss,
+          takeProfits: signal.takeProfits,
+        });
+        const refPrice = await fetchPriceSafe(client, sym, aligned.entry);
         const entryType = settings.trading.orders.entryType;
         const limitPrice =
-          entryType === "limit" ? signal.entryPrice ?? refPrice : null;
+          entryType === "limit" ? aligned.entry ?? refPrice : null;
         const res = await placeEntry(
           client, live, sym, signal.side, sizeUsdt,
           limitPrice ? entryType : "market", limitPrice, refPrice
@@ -358,9 +396,9 @@ export async function executeSignal(
           qty: res.qty,
           originalQty: res.qty,
           sizeUsdt,
-          stopLoss: settings.trading.orders.attachStopLoss ? signal.stopLoss : null,
+          stopLoss: settings.trading.orders.attachStopLoss ? aligned.stopLoss : null,
           takeProfits: settings.trading.orders.attachTakeProfit
-            ? [...signal.takeProfits].sort((a, b) =>
+            ? [...aligned.takeProfits].sort((a, b) =>
                 signal.side === "long" ? a - b : b - a)
             : [],
           tpCountOriginal: signal.takeProfits.length,
@@ -441,11 +479,13 @@ export async function executeSignal(
           await record("update_sl", { symbol: sym, side: null, sizeUsdt: 0, qty: 0, price: null, leverage: 0 }, live, false, `no tracked position for ${sym}`);
           return;
         }
-        const newSl = signal.stopLossBreakeven ? pos.entryPrice : signal.stopLoss;
-        if (newSl == null) {
+        const rawSl = signal.stopLossBreakeven ? pos.entryPrice : signal.stopLoss;
+        if (rawSl == null) {
           await record("update_sl", { symbol: sym, side: pos.side, sizeUsdt: 0, qty: 0, price: null, leverage: pos.leverage }, live, false, "no stop-loss value found in message");
           return;
         }
+        // stop-loss rounds UP to Pionex precision (無條件進位)
+        const newSl = (await alignPrices(client, sym, { stopLoss: rawSl })).stopLoss!;
         const old = pos.stopLoss;
         pos.stopLoss = newSl;
         await savePositions(positions);
@@ -464,7 +504,9 @@ export async function executeSignal(
           await record("update_tp", { symbol: sym, side: pos.side, sizeUsdt: 0, qty: 0, price: null, leverage: pos.leverage }, live, false, "no take-profit values found in message");
           return;
         }
-        pos.takeProfits = [...signal.takeProfits].sort((a, b) =>
+        // take-profits round DOWN to Pionex precision (無條件縮減)
+        const alignedTps = (await alignPrices(client, sym, { takeProfits: signal.takeProfits })).takeProfits;
+        pos.takeProfits = [...alignedTps].sort((a, b) =>
           pos.side === "long" ? a - b : b - a);
         pos.tpCountOriginal = Math.max(pos.tpCountOriginal, pos.takeProfits.length);
         await savePositions(positions);

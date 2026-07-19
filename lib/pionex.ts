@@ -56,6 +56,26 @@ export function signRequest(
   return createHmac("sha256", apiSecret).update(message).digest("hex");
 }
 
+/** Number of decimal places implied by a numeric string like "0.001" -> 3. */
+export function decimalsOf(v: string | number): number | null {
+  const s = String(v);
+  if (!/^\d*\.?\d+$/.test(s)) return null;
+  const i = s.indexOf(".");
+  return i === -1 ? 0 : s.length - i - 1;
+}
+
+/** Round UP to `decimals` places (無條件進位), fp-safe. */
+export function ceilToDecimals(v: number, decimals: number): number {
+  const f = Math.pow(10, decimals);
+  return Math.ceil(v * f - 1e-9) / f;
+}
+
+/** Round DOWN to `decimals` places (無條件縮減/捨去), fp-safe. */
+export function floorToDecimals(v: number, decimals: number): number {
+  const f = Math.pow(10, decimals);
+  return Math.floor(v * f + 1e-9) / f;
+}
+
 export function toPerpSymbol(
   symbol: string,
   format = "{base}_{quote}"
@@ -135,6 +155,64 @@ export class PionexClient {
       );
     }
     return payload;
+  }
+
+  private symbolInfo: Record<string, any> | null = null;
+
+  /** Load & cache the perp symbol catalogue (common/symbols + type=PERP). */
+  private async loadSymbolInfo(): Promise<Record<string, any>> {
+    if (this.symbolInfo) return this.symbolInfo;
+    const payload = await this.request("GET", "/api/v1/common/symbols");
+    const symbols: any[] = payload?.data?.symbols ?? [];
+    const map: Record<string, any> = {};
+    for (const s of symbols) if (s?.symbol) map[s.symbol] = s;
+    this.symbolInfo = map;
+    return map;
+  }
+
+  private infoFor(tradeSymbol: string, map: Record<string, any>): any | null {
+    // trade symbol is BTC_USDT; the catalogue lists it as BTC_USDT_PERP
+    return map[`${tradeSymbol}_PERP`] ?? map[tradeSymbol] ?? null;
+  }
+
+  /** Price decimal places Pionex accepts for a symbol (null if unknown). */
+  async pricePrecision(tradeSymbol: string): Promise<number | null> {
+    try {
+      const info = this.infoFor(tradeSymbol, await this.loadSymbolInfo());
+      if (!info) return null;
+      for (const f of ["quotePrecision", "pricePrecision", "quoteScale"]) {
+        if (typeof info[f] === "number") return info[f];
+      }
+      for (const f of ["tickSize", "minPrice", "priceTick"]) {
+        if (info[f] != null) {
+          const d = decimalsOf(info[f]);
+          if (d != null) return d;
+        }
+      }
+    } catch {
+      /* ignore - caller falls back to no rounding */
+    }
+    return null;
+  }
+
+  /** Quantity (base asset) decimal places Pionex accepts (null if unknown). */
+  async basePrecision(tradeSymbol: string): Promise<number | null> {
+    try {
+      const info = this.infoFor(tradeSymbol, await this.loadSymbolInfo());
+      if (!info) return null;
+      for (const f of ["basePrecision", "sizePrecision", "baseScale"]) {
+        if (typeof info[f] === "number") return info[f];
+      }
+      for (const f of ["minTradeSize", "minSize", "stepSize"]) {
+        if (info[f] != null) {
+          const d = decimalsOf(info[f]);
+          if (d != null) return d;
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    return null;
   }
 
   async getAvailableUsdt(): Promise<number> {

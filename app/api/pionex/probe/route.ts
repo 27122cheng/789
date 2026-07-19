@@ -36,6 +36,21 @@ function collectSymbols(payload: any): string[] {
   return [...out];
 }
 
+// full symbol objects (to reveal precision/tick fields)
+function collectObjects(payload: any): any[] {
+  const out: any[] = [];
+  const walk = (v: any) => {
+    if (!v) return;
+    if (Array.isArray(v)) return v.forEach(walk);
+    if (typeof v === "object") {
+      if (typeof v.symbol === "string") out.push(v);
+      else Object.values(v).forEach(walk);
+    }
+  };
+  walk(payload?.data ?? payload);
+  return out;
+}
+
 export async function GET(req: NextRequest) {
   const denied = await requireAdmin(req);
   if (denied) return denied;
@@ -79,13 +94,35 @@ export async function GET(req: NextRequest) {
         .filter((s) => /BTC|ETH|SOL/i.test(s))
         .slice(0, 30);
 
+  // when a coin is given, show a couple of FULL objects so precision/tick
+  // fields are visible (used to align prices to Pionex's tick size)
+  let sampleObjects: any[] = [];
+  if (coin) {
+    for (const path of ["/api/v1/common/symbols?type=PERP", "/api/v1/common/symbols"]) {
+      try {
+        const r = await fetch(base + path, { cache: "no-store" });
+        const j = await r.json();
+        const objs = collectObjects(j).filter((o) =>
+          String(o.symbol).toUpperCase().includes(coin)
+        );
+        if (objs.length) {
+          sampleObjects = objs.slice(0, 3);
+          break;
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
   return NextResponse.json({
     baseUrl: base,
     currentSymbolFormat: settings.pionex.symbolFormat,
     hint:
-      "看 sampleSymbols / matchingSymbols 裡實際的字串長怎樣（例如 BTC_USDT 或 BTC_USDT_PERP），" +
-      "到設定頁把「合約代碼格式」改成對應的樣板即可。",
+      "看 sampleObjects 裡的精度欄位（basePrecision/quotePrecision/minTradeSize 等），" +
+      "用來把價格與數量對齊 Pionex 的最小單位。",
     matchingSymbols: matching,
+    sampleObjects,
     endpoints: results,
   });
 }
