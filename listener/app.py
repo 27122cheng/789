@@ -30,20 +30,26 @@ from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError
 from telethon.sessions import StringSession
 
-INGEST_URL = os.getenv("INGEST_URL", "").strip()
+# Defaults are pre-filled for this project so Koyeb needs ZERO env vars:
+# just deploy and log in. Override via env only if your Vercel URL differs.
+INGEST_URL = os.getenv("INGEST_URL", "https://789-lovat.vercel.app/api/ingest").strip()
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "123456789").strip()
 WATCH_CHATS = [c.strip().lstrip("@") for c in os.getenv("WATCH_CHATS", "").split(",") if c.strip()]
 PORT = int(os.getenv("PORT", "8080"))
-# Login is stored as a portable StringSession so hosts without a persistent
-# disk survive restarts: after logging in once, copy the shown session string
-# into a SESSION_STRING env var and you never have to log in again.
+# The login (api creds + StringSession) is saved to Vercel KV via the
+# companion site, so restarts auto-resume with no env config - log in once,
+# forever. SESSION_STRING env still works as a manual override.
 SESSION_STRING = os.getenv("SESSION_STRING", "").strip()
+# where to load/save the persisted login (derived from INGEST_URL)
+SESSION_URL = INGEST_URL.replace("/api/ingest", "/api/session")
 
 # in-memory login/runtime state
 state = {
     "client": None,      # TelegramClient once created
     "phone": None,
     "phone_code_hash": None,
+    "api_id": None,
+    "api_hash": None,
     "authorized": False,
     "forwarded": 0,
     "last": "",
@@ -52,13 +58,41 @@ state = {
 }
 
 
-def make_client(api_id: int, api_hash: str) -> TelegramClient:
-    return TelegramClient(StringSession(SESSION_STRING), api_id, api_hash)
+def make_client(api_id: int, api_hash: str, session_str: str = "") -> TelegramClient:
+    return TelegramClient(StringSession(session_str or SESSION_STRING), api_id, api_hash)
 
 
-def remember_session(client: TelegramClient) -> None:
+async def save_login_to_cloud(api_id: int, api_hash: str, session_str: str) -> None:
+    """Persist the login to Vercel KV so restarts auto-resume."""
+    headers = {"x-admin-password": ADMIN_PASSWORD, "Content-Type": "application/json"}
+    payload = {"apiId": api_id, "apiHash": api_hash, "session": session_str}
     try:
-        state["session_string"] = client.session.save()
+        async with aiohttp.ClientSession() as s:
+            async with s.post(SESSION_URL, json=payload, headers=headers, timeout=20) as r:
+                await r.read()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def load_login_from_cloud():
+    """Return (api_id, api_hash, session) saved earlier, or None."""
+    headers = {"x-admin-password": ADMIN_PASSWORD}
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(SESSION_URL, headers=headers, timeout=20) as r:
+                data = await r.json()
+        if data.get("session") and data.get("apiId") and data.get("apiHash"):
+            return int(data["apiId"]), str(data["apiHash"]), str(data["session"])
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+async def remember_session(client: TelegramClient, api_id: int, api_hash: str) -> None:
+    try:
+        s = client.session.save()
+        state["session_string"] = s
+        await save_login_to_cloud(api_id, api_hash, s)
     except Exception:  # noqa: BLE001
         state["session_string"] = ""
 
@@ -85,14 +119,9 @@ def page(body: str) -> web.Response:
 def status_body() -> str:
     watched = ", ".join(WATCH_CHATS) if WATCH_CHATS else "所有頻道與群組"
     err = f'<p class="err">錯誤：{html.escape(state["error"])}</p>' if state["error"] else ""
-    sess = state.get("session_string") or ""
-    persist = ""
-    if sess and not SESSION_STRING:
-        persist = f"""<div class="panel">
-  <p class="ok">🔑 讓重開機後免再登入：把下面這段設成主機的環境變數
-  <code>SESSION_STRING</code>（設好後重新部署一次即可）。</p>
-  <textarea readonly rows="3" style="width:100%;font-size:11px">{html.escape(sess)}</textarea>
-  <p class="hint">這段等同你的登入憑證，請勿外流。</p>
+    persist = """<div class="panel">
+  <p class="ok">🔑 登入已自動存到你的 Vercel 資料庫，之後主機重開都會自動保持登入，
+  不用再做任何事。</p>
 </div>"""
     return f"""<h1>✅ 已登入，監聽中</h1>
 <div class="panel">
@@ -159,7 +188,8 @@ async def handle_start(request):
         client = make_client(api_id, api_hash)
         await client.connect()
         sent = await client.send_code_request(phone)
-        state.update(client=client, phone=phone, phone_code_hash=sent.phone_code_hash)
+        state.update(client=client, phone=phone, phone_code_hash=sent.phone_code_hash,
+                     api_id=api_id, api_hash=api_hash)
     except Exception as e:  # noqa: BLE001
         state["error"] = str(e)
     raise web.HTTPFound("/")
@@ -181,7 +211,7 @@ async def handle_code(request):
             await client.sign_in(password=password)
         state["authorized"] = True
         state["phone_code_hash"] = None
-        remember_session(client)
+        await remember_session(client, state["api_id"], state["api_hash"])
         await start_watching(client)
     except web.HTTPFound:
         raise
@@ -242,17 +272,24 @@ async def start_watching(client: TelegramClient):
 
 
 async def try_resume_session():
-    """On startup, resume from SESSION_STRING (+ api creds) with no re-login."""
-    api_id = os.getenv("TELEGRAM_API_ID", "").strip()
-    api_hash = os.getenv("TELEGRAM_API_HASH", "").strip()
-    if not (SESSION_STRING and api_id and api_hash):
-        return  # not fully configured; user will log in via the web form
+    """On startup, resume the saved login (from Vercel KV, or SESSION_STRING +
+    env creds) so restarts need no re-login."""
+    # 1) prefer the login persisted to Vercel KV (zero env config)
+    creds = await load_login_from_cloud()
+    if creds:
+        api_id, api_hash, sess = creds
+    else:
+        # 2) fall back to env vars
+        env_id = os.getenv("TELEGRAM_API_ID", "").strip()
+        env_hash = os.getenv("TELEGRAM_API_HASH", "").strip()
+        if not (SESSION_STRING and env_id and env_hash):
+            return  # not configured yet; user logs in via the web form
+        api_id, api_hash, sess = int(env_id), env_hash, SESSION_STRING
     try:
-        client = make_client(int(api_id), api_hash)
+        client = make_client(api_id, api_hash, sess)
         await client.connect()
         if await client.is_user_authorized():
-            state.update(client=client, authorized=True)
-            remember_session(client)
+            state.update(client=client, authorized=True, api_id=api_id, api_hash=api_hash)
             await start_watching(client)
     except Exception as e:  # noqa: BLE001
         state["error"] = str(e)

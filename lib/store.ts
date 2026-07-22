@@ -25,6 +25,7 @@ const K_DEDUP = KEY_PREFIX + "dedup";
 const K_ADMIN_HASH = KEY_PREFIX + "adminPasswordHash";
 const K_CRON_SECRET = KEY_PREFIX + "cronSecret";
 const K_WEBHOOK_EVENTS = KEY_PREFIX + "webhookEvents";
+const K_LISTENER = KEY_PREFIX + "listenerSession";
 
 // 10 pages x 10 rows in the UI; oldest entries beyond this are dropped
 const MAX_LOG = 100;
@@ -143,6 +144,25 @@ export async function purgeSymbolRecords(symbol: string): Promise<void> {
   await kvSet(K_SIGNALS, signals.filter((s) => s.symbol !== symbol));
   const orders = (await kvGet<OrderRecord[]>(K_ORDERS)) ?? [];
   await kvSet(K_ORDERS, orders.filter((o) => o.symbol !== symbol));
+}
+
+// ------------------------------------ listener login (Telethon) persistence
+/** The user-account listener stores its api creds + StringSession here so it
+ *  auto-resumes after a restart with no env config - log in once, forever. */
+export async function getListenerSession(): Promise<{
+  apiId: number;
+  apiHash: string;
+  session: string;
+} | null> {
+  return await kvGet(K_LISTENER);
+}
+
+export async function setListenerSession(v: {
+  apiId: number;
+  apiHash: string;
+  session: string;
+}): Promise<void> {
+  await kvSet(K_LISTENER, v);
 }
 
 // --------------------------------------------- raw webhook diagnostic log
