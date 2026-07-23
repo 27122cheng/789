@@ -40,6 +40,13 @@ PORT = int(os.getenv("PORT", "8080"))
 # companion site, so restarts auto-resume with no env config - log in once,
 # forever. SESSION_STRING env still works as a manual override.
 SESSION_STRING = os.getenv("SESSION_STRING", "").strip()
+
+# Public Telegram Desktop api_id/api_hash (from the open-source tdesktop
+# client). Used as a fallback so a user blocked by my.telegram.org's flaky
+# app-creation can still log in with just a phone number. You may supply your
+# own via the form if you have them.
+DEFAULT_API_ID = int(os.getenv("DEFAULT_API_ID", "2040"))
+DEFAULT_API_HASH = os.getenv("DEFAULT_API_HASH", "b18441a1ff607e10a989891a5462e627")
 # where to load/save the persisted login (derived from INGEST_URL)
 SESSION_URL = INGEST_URL.replace("/api/ingest", "/api/session")
 
@@ -155,15 +162,17 @@ def login_body() -> str:
 </div>"""
     return f"""<h1>登入你的 Telegram 帳號</h1>
 <div class="panel">
-  <p class="hint">到 <code>my.telegram.org</code> → API development tools 取得
-  api_id 和 api_hash，填在下面。手機號要含國碼，例如 <code>+886912345678</code>。</p>
+  <p class="ok">只要填手機號就好！api_id / api_hash 留空會自動用通用預設值，
+  不用去 my.telegram.org。</p>
+  <p class="hint">手機號要含國碼，台灣是 <code>+886</code> 開頭，
+  例如 <code>+886912345678</code>。</p>
   <form method="post" action="/start">
-    <label>api_id</label>
-    <input name="api_id" inputmode="numeric" placeholder="123456">
-    <label>api_hash</label>
-    <input name="api_hash" placeholder="abcdef0123456789...">
-    <label>手機號（含國碼）</label>
-    <input name="phone" placeholder="+886912345678">
+    <label>手機號（含國碼）★必填</label>
+    <input name="phone" placeholder="+886912345678" autofocus>
+    <label>api_id（可留空）</label>
+    <input name="api_id" inputmode="numeric" placeholder="留空用預設">
+    <label>api_hash（可留空）</label>
+    <input name="api_hash" placeholder="留空用預設">
     <button type="submit">傳送驗證碼</button>
   </form>
   {err}
@@ -180,11 +189,14 @@ async def handle_start(request):
     state["error"] = ""
     data = await request.post()
     try:
-        api_id = int(str(data.get("api_id", "")).strip())
-        api_hash = str(data.get("api_hash", "")).strip()
+        api_id_raw = str(data.get("api_id", "")).strip()
+        api_hash_raw = str(data.get("api_hash", "")).strip()
         phone = str(data.get("phone", "")).strip()
-        if not (api_id and api_hash and phone):
-            raise ValueError("api_id / api_hash / 手機號都要填")
+        # blank api_id/api_hash -> use the public Telegram Desktop credentials
+        api_id = int(api_id_raw) if api_id_raw else DEFAULT_API_ID
+        api_hash = api_hash_raw if api_hash_raw else DEFAULT_API_HASH
+        if not phone:
+            raise ValueError("請填手機號（含國碼，例如 +886912345678）")
         client = make_client(api_id, api_hash)
         await client.connect()
         sent = await client.send_code_request(phone)
