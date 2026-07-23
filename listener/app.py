@@ -35,7 +35,7 @@ from telethon.sessions import StringSession
 INGEST_URL = os.getenv("INGEST_URL", "https://789-lovat.vercel.app/api/ingest").strip()
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "123456789").strip()
 WATCH_CHATS = [c.strip().lstrip("@") for c in os.getenv("WATCH_CHATS", "").split(",") if c.strip()]
-PORT = int(os.getenv("PORT", "8080"))
+PORT = int(os.getenv("PORT") or "8080")  # tolerate an empty PORT env var
 # The login (api creds + StringSession) is saved to Vercel KV via the
 # companion site, so restarts auto-resume with no env config - log in once,
 # forever. SESSION_STRING env still works as a manual override.
