@@ -187,9 +187,9 @@ export const DEFAULT_SETTINGS: Settings = {
     apiKey: "",
     apiSecret: "",
     baseUrl: "https://api.pionex.com",
-    // Pionex perp TRADE symbol = base_quote (no _PERP); market selected by
-    // type=PERP. The _PERP suffix only appears in market-data listings.
-    symbolFormat: "{base}_{quote}",
+    // Pionex perp futures TRADE symbol = base_quote_PERP on the /uapi/v1
+    // endpoints (positionSide=BOTH one-way mode).
+    symbolFormat: "{base}_{quote}_PERP",
   },
   trading: {
     liveTrading: false,

@@ -127,7 +127,7 @@ async function alignPrices(
   symbol: string,
   p: { entry?: number | null; stopLoss?: number | null; takeProfits?: number[] }
 ): Promise<{ entry: number | null; stopLoss: number | null; takeProfits: number[] }> {
-  const dec = await client.pricePrecision(client.perpSymbol(symbol));
+  const dec = await client.pricePrecision(symbol);
   const up = (v: number | null | undefined) =>
     v == null ? null : dec == null ? v : ceilToDecimals(v, dec);
   const down = (v: number) => (dec == null ? v : floorToDecimals(v, dec));
@@ -253,7 +253,7 @@ async function closeQty(
   const baseDec = f.baseDecimals ?? 6;
   const sizeStr = floorToDecimals(qty, baseDec).toFixed(baseDec);
   const resp = await client.placeOrder({
-    symbol: perp, side: apiSide, type: "MARKET", size: sizeStr,
+    symbol: perp, side: apiSide, type: "MARKET", size: sizeStr, reduceOnly: true,
   });
   const oid = String(resp?.data?.orderId ?? "");
   return oid ? [oid] : [];

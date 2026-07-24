@@ -14,25 +14,24 @@ import { signRequest } from "@/lib/pionex";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// The namespace is confirmed: /api/v1/trade/* + type=PERP. Now probe the
-// read-only openOrders endpoint with different symbol formats and type
-// placements to find the exact combination the trade API accepts (whichever
-// returns result:true is the format the order endpoint wants). All GET/safe.
+// Perpetual futures live under the /uapi/v1 namespace (positionSide, _PERP
+// symbols). Probe those read-only endpoints so we can confirm the account +
+// order namespace the trade API actually accepts (whichever returns
+// result:true is live). The old /api/v1 + type=PERP rows are kept for contrast
+// (they serve perp MARKET DATA but reject perp orders). All GET / safe.
 // [path, extraQueryParams]
 const CANDIDATES: [string, Record<string, string>][] = [
-  // baseline account reads
+  // futures namespace (the one that accepts perp orders)
+  ["/uapi/v1/account/balances", {}],
+  ["/uapi/v1/common/symbols", {}],
+  ["/uapi/v1/market/tickers", { symbol: "BTC_USDT_PERP" }],
+  ["/uapi/v1/trade/openOrders", { symbol: "BTC_USDT_PERP" }],
+  ["/uapi/v1/trade/allOrders", { symbol: "BTC_USDT_PERP", limit: "1" }],
+  ["/uapi/v1/account/positions", {}],
+  ["/uapi/v1/trade/positions", {}],
+  // legacy spot namespace (perp market data only; orders rejected)
   ["/api/v1/account/balances", { type: "PERP" }],
-  // symbol-format variations on openOrders
-  ["/api/v1/trade/openOrders", { symbol: "BTC_USDT_PERP", type: "PERP" }],
   ["/api/v1/trade/openOrders", { symbol: "BTC_USDT", type: "PERP" }],
-  ["/api/v1/trade/openOrders", { symbol: "BTC_USDT_PERP" }],
-  ["/api/v1/trade/openOrders", { symbol: "BTCUSDT", type: "PERP" }],
-  ["/api/v1/trade/openOrders", { symbol: "BTC-USDT-PERP", type: "PERP" }],
-  ["/api/v1/trade/allOrders", { symbol: "BTC_USDT_PERP", type: "PERP", limit: "1" }],
-  // positions under the trade/account namespace
-  ["/api/v1/trade/positions", { type: "PERP" }],
-  ["/api/v1/account/positions", { type: "PERP" }],
-  ["/api/v1/trade/position", { symbol: "BTC_USDT_PERP", type: "PERP" }],
 ];
 
 export async function GET(req: NextRequest) {
