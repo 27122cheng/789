@@ -289,6 +289,45 @@ describe("dry-run pipeline", () => {
     expect(orders[0].side).toBe("buy");
   });
 
+  it("OKX credential errors (50101) fail the trade instead of parking it", async () => {
+    const cfg = settings();
+    cfg.exchange = "okx";
+    cfg.okx = {
+      apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false,
+    };
+    cfg.trading.liveTrading = true;
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.orders.entryType = "limit";
+
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (url.includes("/public/instruments")) {
+        return { ok: true, status: 200, json: async () => ({ code: "0", data: [
+          { instId: "DOT-USDT-SWAP", ctVal: "0.1", lotSz: "0.1", minSz: "0.1", tickSz: "0.001" },
+        ] }) };
+      }
+      if (url.includes("/market/ticker")) {
+        return { ok: true, status: 200, json: async () => ({ code: "0", data: [{ last: "3100" }] }) };
+      }
+      // every authenticated call is rejected: demo key used against live
+      return { ok: true, status: 200, json: async () => ({
+        code: "50101", msg: "APIKey does not match current environment.", data: [],
+      }) };
+    }));
+
+    await handleIncomingMessage(
+      "DOTUSDT LONG Entry: 3000 SL: 2900 TP1: 3100", meta(), cfg
+    );
+
+    // no phantom "waiting to enter" position is left behind
+    expect((await getPositions())["DOTUSDT"]).toBeUndefined();
+    const rec = (await getOrders()).find((o) => o.symbol === "DOTUSDT");
+    expect(rec!.success).toBe(false);
+    expect(rec!.message).toContain("OKX");
+    expect(rec!.message).toContain("模擬盤");   // actionable hint, not a bare code
+    expect(rec!.message).not.toContain("Pionex");
+  });
+
   it("R-multiple scale-out closes the configured % at r×R profit", async () => {
     const cfg = settings();
     cfg.trading.risk.cooldownSeconds = 0;

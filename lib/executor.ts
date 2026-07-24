@@ -131,13 +131,41 @@ async function fetchPriceSafe(
   }
 }
 
-/** True for Pionex rejections that mean "this account may not trade perps via
- *  the API at all" (TRADE_TYPE_DENIED / not in whitelist). These are account
- *  permissions, not order parameters: retrying, resizing or switching to a
+function venueName(settings: Settings): string {
+  return settings.exchange === "okx" ? "OKX" : "Pionex";
+}
+
+/** True for rejections caused by the account/credentials rather than by this
+ *  particular order: API permissions, a wrong passphrase, a demo-vs-live key
+ *  mismatch, the wrong account mode. Retrying, resizing or switching to a
  *  market order cannot help, so the trade must fail loudly rather than fall
- *  back to a watcher that is guaranteed to fail later. */
+ *  back to a watcher that is guaranteed to fail later too. */
 function isPermissionDenied(msg: string): boolean {
-  return /TRADE_TYPE_DENIED|not in whitelist|user denied|PERMISSION|UNAUTHORIZED|FORBIDDEN/i.test(msg);
+  return (
+    /TRADE_TYPE_DENIED|not in whitelist|user denied|PERMISSION|UNAUTHORIZED|FORBIDDEN/i.test(msg) ||
+    /\b(50100|50101|50102|50103|50104|50105|50111|50112|50113|50114|51010)\b/.test(msg) ||
+    /APIKey does not match|passphrase|invalid signature|invalid authorization/i.test(msg)
+  );
+}
+
+/** Plain-Chinese cause + fix for the OKX credential/config errors that are
+ *  otherwise just an opaque number. */
+function okxCodeHint(msg: string): string | null {
+  if (/\b50101\b|APIKey does not match/i.test(msg))
+    return "（金鑰的環境不符：模擬盤金鑰要勾「使用 OKX 模擬盤」，正式盤金鑰要取消勾選。兩者不通用。）";
+  if (/\b50105\b|passphrase/i.test(msg))
+    return "（Passphrase 錯誤：那是你建立金鑰時自己設定的密碼，不是登入密碼。忘記只能刪掉重建金鑰。）";
+  if (/\b(50111|50113)\b|invalid signature/i.test(msg))
+    return "（API Key 或 Secret 有誤，常見原因是複製時多了空白。）";
+  if (/\b50102\b/.test(msg))
+    return "（請求時間戳過期，通常是暫時性問題，稍後會自動重試。）";
+  if (/\b50110\b/.test(msg))
+    return "（此金鑰綁了 IP 白名單，但 Vercel 的出口 IP 不固定 → 請把白名單清空。）";
+  if (/\b51010\b/.test(msg))
+    return "（帳戶模式不支援合約：請到 OKX 把帳戶模式改成「現貨和合約模式」以上。）";
+  if (/\b51008\b/.test(msg))
+    return "（可用保證金不足：確認 USDT 已從「資金帳戶」劃轉到「交易帳戶」。）";
+  return null;
 }
 
 function permHint(settings: Settings): string {
@@ -461,7 +489,7 @@ export async function executeSignal(
                 mode = "limit_order";
                 orderId = r.orderIds[0] ?? null;
                 pendQty = r.qty;
-                note = `已在 Pionex 掛限價單 @ ${aligned.entry}（現價 ${refPrice}）`;
+                note = `已在 ${venueName(settings)} 掛限價單 @ ${aligned.entry}（現價 ${refPrice}）`;
               } catch (err) {
                 const emsg = (err as Error).message;
                 // An account-permission rejection will hit the market fallback
@@ -470,12 +498,12 @@ export async function executeSignal(
                 if (isPermissionDenied(emsg)) {
                   await record("open",
                     { symbol: sym, side: signal.side, sizeUsdt, qty: 0, price: aligned.entry, leverage },
-                    live, false, `Pionex 拒絕合約下單：${emsg}${permHint(settings)}`);
+                    live, false, `${venueName(settings)} 拒絕下單：${emsg}${okxCodeHint(emsg) ?? permHint(settings)}`);
                   return;
                 }
                 // otherwise keep the trade alive: watch the price ourselves
                 note =
-                  `Pionex 掛限價單被拒（${emsg}）` +
+                  `${venueName(settings)} 掛限價單被拒（${emsg}）` +
                   `→ 改用到價自動進場 @ ${aligned.entry}（現價 ${refPrice}）`;
               }
             }
@@ -627,7 +655,7 @@ export async function executeSignal(
       msg += "（下單金額低於 Pionex 最低下單額，請到設定調高「固定金額」）";
     }
     if (isPermissionDenied(msg)) {
-      msg += permHint(settings);
+      msg += okxCodeHint(msg) ?? permHint(settings);
     }
     await record(signal.action,
       { symbol: sym, side: signal.side, sizeUsdt: 0, qty: 0, price: null, leverage: 0 },
@@ -735,7 +763,7 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
           changed = true;
           await record("open",
             { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: 0, price: target, leverage: pos.leverage },
-            live && !pos.dryRun, false, `到價但 Pionex 拒絕下單：${emsg}${permHint(settings)}`);
+            live && !pos.dryRun, false, `到價但 ${venueName(settings)} 拒絕下單：${emsg}${okxCodeHint(emsg) ?? permHint(settings)}`);
         }
       }
       continue; // just entered (or failed) - don't run SL/TP this tick
