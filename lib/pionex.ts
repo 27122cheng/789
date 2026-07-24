@@ -195,6 +195,26 @@ export class PionexClient {
     return null;
   }
 
+  /** Order filters (step sizes + minimum order size) for a symbol. */
+  async orderFilters(tradeSymbol: string): Promise<{
+    baseDecimals: number | null;   // qty decimal places (from baseStep/precision)
+    quoteDecimals: number | null;  // price decimal places (from quoteStep/precision)
+    minSizeLimit: number | null;
+    minSizeMarket: number | null;
+  }> {
+    const info = this.infoFor(tradeSymbol, await this.loadSymbolInfo().catch(() => ({})));
+    if (!info) return { baseDecimals: null, quoteDecimals: null, minSizeLimit: null, minSizeMarket: null };
+    const num = (v: any) => (v == null ? null : Number(v));
+    const dec = (v: any, p: any) =>
+      v != null ? decimalsOf(v) : typeof p === "number" ? p : null;
+    return {
+      baseDecimals: dec(info.baseStep, info.basePrecision),
+      quoteDecimals: dec(info.quoteStep, info.quotePrecision),
+      minSizeLimit: num(info.minSizeLimit ?? info.minTradeSize),
+      minSizeMarket: num(info.minSizeMarket ?? info.minTradeSize),
+    };
+  }
+
   /** Quantity (base asset) decimal places Pionex accepts (null if unknown). */
   async basePrecision(tradeSymbol: string): Promise<number | null> {
     try {

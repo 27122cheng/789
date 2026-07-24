@@ -205,22 +205,26 @@ async function placeEntry(
     };
   }
 
-  // round quantity DOWN to Pionex's base precision so we never exceed size
-  const baseDec = await client.basePrecision(symbol);
-  const qtyStr = baseDec == null ? qty.toFixed(6) : floorToDecimals(qty, baseDec).toFixed(baseDec);
+  // Snap quantity to the contract's size step (round down) and lift it to the
+  // minimum order size, so it passes Pionex's SIZE filter.
+  const f = await client.orderFilters(symbol);
+  const baseDec = f.baseDecimals ?? 6;
+  const minSize = entryType === "limit" ? f.minSizeLimit : f.minSizeMarket;
+  qty = floorToDecimals(qty, baseDec);
+  if (minSize && qty < minSize) qty = minSize;
+  const qtyStr = qty.toFixed(baseDec);
 
   const apiSide = side === "long" ? "BUY" : "SELL";
   let resp: Record<string, any>;
   if (entryType === "limit" && limitPrice) {
+    // align the limit price to the price step to pass the PRICE filter
+    const priceStr =
+      f.quoteDecimals == null ? String(limitPrice) : limitPrice.toFixed(f.quoteDecimals);
     resp = await client.placeOrder({
-      symbol: perp, side: apiSide, type: "LIMIT",
-      size: qtyStr, price: String(limitPrice),
-    });
-  } else if (apiSide === "BUY") {
-    resp = await client.placeOrder({
-      symbol: perp, side: apiSide, type: "MARKET", amount: sizeUsdt.toFixed(2),
+      symbol: perp, side: apiSide, type: "LIMIT", size: qtyStr, price: priceStr,
     });
   } else {
+    // market order: size-based for both directions (perp) - no price filter
     resp = await client.placeOrder({
       symbol: perp, side: apiSide, type: "MARKET", size: qtyStr,
     });
@@ -230,7 +234,7 @@ async function placeEntry(
     qty,
     price,
     orderIds: oid ? [oid] : [],
-    note: `${entryType} ${side} order placed`,
+    note: `${entryType} ${side} order placed (qty ${qtyStr})`,
   };
 }
 
@@ -243,19 +247,14 @@ async function closeQty(
   if (!live || pos.dryRun) return [];
   const perp = client.perpSymbol(pos.symbol);
   const apiSide = pos.side === "long" ? "SELL" : "BUY";
-  let resp: Record<string, any>;
-  if (apiSide === "SELL") {
-    resp = await client.placeOrder({
-      symbol: perp, side: apiSide, type: "MARKET", size: qty.toFixed(6),
-    });
-  } else {
-    // closing a short = market BUY; use quote amount based on current price
-    const price = await client.getPrice(perp);
-    resp = await client.placeOrder({
-      symbol: perp, side: apiSide, type: "MARKET",
-      amount: (qty * price).toFixed(2),
-    });
-  }
+  // perp close: size-based market order in the opposite direction, size
+  // snapped to the contract step
+  const f = await client.orderFilters(pos.symbol);
+  const baseDec = f.baseDecimals ?? 6;
+  const sizeStr = floorToDecimals(qty, baseDec).toFixed(baseDec);
+  const resp = await client.placeOrder({
+    symbol: perp, side: apiSide, type: "MARKET", size: sizeStr,
+  });
   const oid = String(resp?.data?.orderId ?? "");
   return oid ? [oid] : [];
 }
