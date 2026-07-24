@@ -142,6 +142,9 @@ export interface Settings {
       entryType: "market" | "limit";
       attachStopLoss: boolean;
       attachTakeProfit: boolean;
+      // 分批止盈: close an equal share of the position at each TP target
+      // (last target closes the remainder). Off = close all at the first TP.
+      splitTakeProfit: boolean;
     };
     trailing: {
       enabled: boolean;
@@ -195,6 +198,7 @@ export const DEFAULT_SETTINGS: Settings = {
       entryType: "market",
       attachStopLoss: true,
       attachTakeProfit: true,
+      splitTakeProfit: true,
     },
     trailing: {
       enabled: false,

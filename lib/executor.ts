@@ -651,12 +651,15 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
       continue;
     }
 
-    // take-profit: each hit target closes an equal fraction of the original qty
+    // take-profit. 分批止盈 (default): each hit target closes an equal fraction
+    // of the original qty (last target closes the remainder). When splitting
+    // is off, the first hit target closes the whole position.
+    const splitTp = settings.trading.orders.splitTakeProfit !== false;
     while (pos.takeProfits.length && (price - pos.takeProfits[0]) * dir >= 0) {
       const target = pos.takeProfits.shift()!;
       const fraction = pos.tpCountOriginal > 0 ? 1 / pos.tpCountOriginal : 1;
-      const qtyToClose = pos.takeProfits.length === 0
-        ? pos.qty // last target -> close the remainder
+      const qtyToClose = !splitTp || pos.takeProfits.length === 0
+        ? pos.qty // close everything (no-split, or the last target)
         : Math.min(pos.qty, pos.originalQty * fraction);
       try {
         const ids = await closeQty(client, live, pos, qtyToClose);

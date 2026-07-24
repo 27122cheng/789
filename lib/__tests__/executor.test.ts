@@ -104,6 +104,17 @@ describe("dry-run pipeline", () => {
     expect(orders.every((o) => o.dryRun)).toBe(true);
   });
 
+  it("splitTakeProfit=false closes the whole position at the first TP", async () => {
+    const cfg = settings();
+    cfg.trading.orders.splitTakeProfit = false;
+    await handleIncomingMessage(
+      "BTCUSDT LONG Entry: 60000 TP1: 61000 TP2: 62000 SL: 59000", meta(), cfg
+    );
+    stubFetchPrice(61000); // first TP hit -> should close everything
+    await monitorTick(cfg);
+    expect((await getPositions())["BTCUSDT"]).toBeUndefined();
+  });
+
   it("trailing stop ratchets the SL upward for a long", async () => {
     const cfg = settings();
     cfg.trading.risk.cooldownSeconds = 0;

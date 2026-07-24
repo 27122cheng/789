@@ -47,6 +47,18 @@ export default function Dashboard() {
     }
   }
 
+  async function clearLogs() {
+    if (!confirm("確定清空所有紀錄？（訂單／動作紀錄與收到的訊息，不影響持倉與設定）")) return;
+    const { status, body } = await apiFetch("/api/logs/clear", { method: "POST" });
+    if (status === 200) {
+      setOrderPage(0);
+      setSignalPage(0);
+      await load();
+    } else {
+      alert(body?.error ?? `清空失敗 (HTTP ${status})`);
+    }
+  }
+
   useEffect(() => {
     if (getStoredPassword()) load();
   }, [load]);
@@ -229,6 +241,15 @@ export default function Dashboard() {
           </table>
         </div>
         <Pager page={signalPage} total={signals.length} onPage={setSignalPage} />
+        {(orders.length > 0 || signals.length > 0) && (
+          <button
+            onClick={clearLogs}
+            className="secondary"
+            style={{ marginTop: 14 }}
+          >
+            🧹 清空所有紀錄（訂單／動作 + 收到的訊息）
+          </button>
+        )}
       </div>
     </div>
   );

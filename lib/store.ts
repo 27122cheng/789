@@ -137,6 +137,12 @@ export async function getOrders(): Promise<OrderRecord[]> {
   return (await kvGet<OrderRecord[]>(K_ORDERS)) ?? [];
 }
 
+/** Empties the signal and order logs (dashboard lists). */
+export async function clearLogs(): Promise<void> {
+  await kvSet(K_SIGNALS, []);
+  await kvSet(K_ORDERS, []);
+}
+
 /** Removes every signal and order record for a symbol - used when a trade
  *  idea is cancelled so its history disappears from the logs entirely. */
 export async function purgeSymbolRecords(symbol: string): Promise<void> {

@@ -35,6 +35,7 @@ export default function SettingsPage() {
   const [entryType, setEntryType] = useState("market");
   const [attachSl, setAttachSl] = useState(true);
   const [attachTp, setAttachTp] = useState(true);
+  const [splitTp, setSplitTp] = useState(true);
   const [trailEnabled, setTrailEnabled] = useState(false);
   const [trailActivate, setTrailActivate] = useState(2);
   const [trailCallback, setTrailCallback] = useState(1);
@@ -77,6 +78,7 @@ export default function SettingsPage() {
     setEntryType(s.trading.orders.entryType);
     setAttachSl(!!s.trading.orders.attachStopLoss);
     setAttachTp(!!s.trading.orders.attachTakeProfit);
+    setSplitTp(s.trading.orders.splitTakeProfit !== false);
     setTrailEnabled(!!s.trading.trailing.enabled);
     setTrailActivate(s.trading.trailing.activateProfitPercent);
     setTrailCallback(s.trading.trailing.callbackPercent);
@@ -127,6 +129,7 @@ export default function SettingsPage() {
             entryType,
             attachStopLoss: attachSl,
             attachTakeProfit: attachTp,
+            splitTakeProfit: splitTp,
           },
           trailing: {
             enabled: trailEnabled,
@@ -286,6 +289,14 @@ export default function SettingsPage() {
               <label htmlFor="atp" style={{ margin: 0 }}>套用信號止盈</label>
             </div>
           </div>
+        </div>
+        <div className="checkbox">
+          <input type="checkbox" id="splittp" checked={splitTp}
+                 onChange={(e) => setSplitTp(e.target.checked)} />
+          <label htmlFor="splittp" style={{ margin: 0 }}>
+            分批止盈：每個止盈價位平掉一部分（例如兩檔各平一半、三檔各平 1/3，
+            最後一檔平剩餘）。取消勾選＝第一個止盈就全部平倉。
+          </label>
         </div>
       </div>
 
