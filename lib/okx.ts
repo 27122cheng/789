@@ -137,6 +137,22 @@ export class OkxClient implements ExchangeClient {
     return map;
   }
 
+  // ---------------------------------------------------- position mode
+  private posModeCache: string | null = null;
+
+  /** "long_short_mode" (雙向持倉, posSide required) or "net_mode" (單向持倉).
+   *  Falls back to net mode if the account config can't be read. */
+  private async posMode(): Promise<string> {
+    if (this.posModeCache) return this.posModeCache;
+    try {
+      const rows = await this.request("GET", "/api/v5/account/config");
+      this.posModeCache = rows[0]?.posMode || "net_mode";
+    } catch {
+      this.posModeCache = "net_mode";
+    }
+    return this.posModeCache!;
+  }
+
   private async infoFor(symbolLike: string): Promise<any | null> {
     const instId = /-SWAP$/i.test(symbolLike) ? symbolLike : this.perpSymbol(symbolLike);
     try {
@@ -264,11 +280,21 @@ export class OkxClient implements ExchangeClient {
       tdMode: this.tdMode,
       side: opts.side.toLowerCase(),          // buy | sell
       ordType: opts.type.toLowerCase(),       // market | limit
-      // one-way (net) position mode: direction comes from side + reduceOnly
       sz: this.szFromBase(info, Number(opts.size ?? 0)),
     };
     if (opts.type === "LIMIT" && opts.price !== undefined) body.px = opts.price;
-    if (opts.reduceOnly) body.reduceOnly = true;
+
+    if ((await this.posMode()) === "long_short_mode") {
+      // 雙向持倉: every order must name the position it acts on. Closing is
+      // the OPPOSITE side of the position being reduced (sell closes a long).
+      // reduceOnly is a net-mode-only flag, so it is omitted here - posSide
+      // plus the opposing side already means "reduce that position".
+      body.posSide = opts.reduceOnly
+        ? (opts.side === "SELL" ? "long" : "short")
+        : (opts.side === "BUY" ? "long" : "short");
+    } else if (opts.reduceOnly) {
+      body.reduceOnly = true;
+    }
     if (opts.clientOrderId) body.clOrdId = opts.clientOrderId;
 
     const rows = await this.request("POST", "/api/v5/trade/order", {}, body);

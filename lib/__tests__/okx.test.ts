@@ -9,7 +9,9 @@ function stubOkx(captured: any[], extra: Record<string, any> = {}) {
   vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
     const body = init?.body ? JSON.parse(init.body) : null;
     let data: any[] = [];
-    if (url.includes("/public/instruments")) {
+    if (url.includes("/account/config")) {
+      data = [{ posMode: extra.posMode ?? "net_mode" }];
+    } else if (url.includes("/public/instruments")) {
       data = [{
         instId: "BTC-USDT-SWAP", ctVal: "0.01", lotSz: "0.1",
         minSz: "0.1", tickSz: "0.1",
@@ -94,6 +96,41 @@ describe("okx contract sizing", () => {
     await expect(
       c.placeOrder({ symbol: "BTC-USDT-SWAP", side: "BUY", type: "MARKET", size: "0.5" })
     ).rejects.toThrow(/51008/);
+  });
+});
+
+describe("okx position mode", () => {
+  it("net mode: no posSide, reduceOnly kept", async () => {
+    const captured: any[] = [];
+    stubOkx(captured, { posMode: "net_mode" });
+    const c = new OkxClient("k", "s", "p");
+    await c.placeOrder({ symbol: "BTC-USDT-SWAP", side: "SELL", type: "MARKET", size: "0.5", reduceOnly: true });
+    expect(captured[0].body.posSide).toBeUndefined();
+    expect(captured[0].body.reduceOnly).toBe(true);
+  });
+
+  it("hedge mode: opening names the position side it creates", async () => {
+    const captured: any[] = [];
+    stubOkx(captured, { posMode: "long_short_mode" });
+    const c = new OkxClient("k", "s", "p");
+    await c.placeOrder({ symbol: "BTC-USDT-SWAP", side: "BUY", type: "MARKET", size: "0.5" });
+    expect(captured[0].body.posSide).toBe("long");
+    await c.placeOrder({ symbol: "BTC-USDT-SWAP", side: "SELL", type: "MARKET", size: "0.5" });
+    expect(captured[1].body.posSide).toBe("short");
+  });
+
+  it("hedge mode: closing names the position being reduced, not the order side", async () => {
+    const captured: any[] = [];
+    stubOkx(captured, { posMode: "long_short_mode" });
+    const c = new OkxClient("k", "s", "p");
+    // selling to close a LONG must target posSide=long
+    await c.placeOrder({ symbol: "BTC-USDT-SWAP", side: "SELL", type: "MARKET", size: "0.5", reduceOnly: true });
+    expect(captured[0].body.posSide).toBe("long");
+    // buying to close a SHORT must target posSide=short
+    await c.placeOrder({ symbol: "BTC-USDT-SWAP", side: "BUY", type: "MARKET", size: "0.5", reduceOnly: true });
+    expect(captured[1].body.posSide).toBe("short");
+    // reduceOnly is a net-mode-only flag; posSide already scopes the close
+    expect(captured[0].body.reduceOnly).toBeUndefined();
   });
 });
 

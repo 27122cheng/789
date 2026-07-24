@@ -165,6 +165,8 @@ function okxCodeHint(msg: string): string | null {
     return "（帳戶模式不支援合約：請到 OKX 把帳戶模式改成「現貨和合約模式」以上。）";
   if (/\b51008\b/.test(msg))
     return "（可用保證金不足：確認 USDT 已從「資金帳戶」劃轉到「交易帳戶」。）";
+  if (/posSide/i.test(msg))
+    return "（持倉模式參數不符：系統會自動偵測單向／雙向持倉，若持續出現請重新儲存一次設定以清除快取。）";
   return null;
 }
 
