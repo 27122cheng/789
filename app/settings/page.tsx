@@ -36,6 +36,8 @@ export default function SettingsPage() {
   const [attachSl, setAttachSl] = useState(true);
   const [attachTp, setAttachTp] = useState(true);
   const [splitTp, setSplitTp] = useState(true);
+  const [rtpEnabled, setRtpEnabled] = useState(false);
+  const [rtpLevels, setRtpLevels] = useState("1:50");
   const [trailEnabled, setTrailEnabled] = useState(false);
   const [trailActivate, setTrailActivate] = useState(2);
   const [trailCallback, setTrailCallback] = useState(1);
@@ -79,6 +81,11 @@ export default function SettingsPage() {
     setAttachSl(!!s.trading.orders.attachStopLoss);
     setAttachTp(!!s.trading.orders.attachTakeProfit);
     setSplitTp(s.trading.orders.splitTakeProfit !== false);
+    const rtp = s.trading.orders.rTakeProfit ?? { enabled: false, levels: [] };
+    setRtpEnabled(!!rtp.enabled);
+    setRtpLevels(
+      (rtp.levels ?? []).map((l: any) => `${l.r}:${l.closePercent}`).join(", ") || "1:50"
+    );
     setTrailEnabled(!!s.trading.trailing.enabled);
     setTrailActivate(s.trading.trailing.activateProfitPercent);
     setTrailCallback(s.trading.trailing.callbackPercent);
@@ -130,6 +137,18 @@ export default function SettingsPage() {
             attachStopLoss: attachSl,
             attachTakeProfit: attachTp,
             splitTakeProfit: splitTp,
+            rTakeProfit: {
+              enabled: rtpEnabled,
+              levels: rtpLevels
+                .split(/[,\n]/)
+                .map((s) => s.trim())
+                .filter(Boolean)
+                .map((pair) => {
+                  const [r, pct] = pair.split(":").map((x) => Number(x.trim()));
+                  return { r, closePercent: pct };
+                })
+                .filter((l) => l.r > 0 && l.closePercent > 0),
+            },
           },
           trailing: {
             enabled: trailEnabled,
@@ -298,6 +317,23 @@ export default function SettingsPage() {
             最後一檔平剩餘）。取消勾選＝第一個止盈就全部平倉。
           </label>
         </div>
+
+        <div className="checkbox" style={{ marginTop: 16 }}>
+          <input type="checkbox" id="rtp" checked={rtpEnabled}
+                 onChange={(e) => setRtpEnabled(e.target.checked)} />
+          <label htmlFor="rtp" style={{ margin: 0 }}>
+            啟用「R 倍數分批止盈」（依進場到止損的風險倍數提前止盈一部分）
+          </label>
+        </div>
+        <label>R 止盈設定（格式 <code>R:平倉%</code>，逗號分隔）</label>
+        <input type="text" value={rtpLevels}
+               onChange={(e) => setRtpLevels(e.target.value)}
+               placeholder="1:50, 2:30, 3:20" />
+        <p className="hint">
+          R = 進場價到止損價的距離（單筆風險）。例如 <code>1:50, 2:30</code> 代表：
+          帳面獲利到達 <b>1R</b> 先平倉 <b>50%</b>，到達 <b>2R</b> 再平 <b>30%</b>
+          （比例以「原始倉位」計算）。需要信號有止損才會啟用；與上面的價位止盈可並存。
+        </p>
       </div>
 
       <div className="panel">

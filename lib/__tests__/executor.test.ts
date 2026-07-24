@@ -115,6 +115,31 @@ describe("dry-run pipeline", () => {
     expect((await getPositions())["BTCUSDT"]).toBeUndefined();
   });
 
+  it("R-multiple scale-out closes the configured % at r×R profit", async () => {
+    const cfg = settings();
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.orders.attachTakeProfit = false; // isolate the R logic
+    cfg.trading.orders.rTakeProfit = {
+      enabled: true,
+      levels: [{ r: 1, closePercent: 50 }, { r: 2, closePercent: 50 }],
+    };
+    // entry 60000, SL 59000 -> R = 1000
+    await handleIncomingMessage("BTCUSDT LONG Entry: 60000 SL: 59000", meta(), cfg);
+    let pos = (await getPositions())["BTCUSDT"];
+    expect(pos.initialRisk).toBe(1000);
+    const q0 = pos.originalQty;
+
+    stubFetchPrice(61000); // +1000 = 1R -> close 50%
+    await monitorTick(cfg);
+    pos = (await getPositions())["BTCUSDT"];
+    expect(pos.qty).toBeCloseTo(q0 * 0.5, 6);
+    expect(pos.rTargets[0].done).toBe(true);
+
+    stubFetchPrice(62000); // +2000 = 2R -> close another 50% of original -> flat
+    await monitorTick(cfg);
+    expect((await getPositions())["BTCUSDT"]).toBeUndefined();
+  });
+
   it("trailing stop ratchets the SL upward for a long", async () => {
     const cfg = settings();
     cfg.trading.risk.cooldownSeconds = 0;

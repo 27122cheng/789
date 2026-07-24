@@ -50,6 +50,8 @@ export interface Position {
   pendingAdds: PendingAdd[];   // 加倉計劃 levels not yet filled
   entryOrderType: "market" | "limit";
   beMoved: boolean;            // SL already moved to breakeven after TP1
+  initialRisk: number | null;  // |entry - stopLoss| at open, for R-multiples
+  rTargets: { r: number; closePercent: number; done: boolean }[];
   orderIds: string[];          // pending entry order ids (limit entries)
   openedAt: number;
   addCount: number;
@@ -145,6 +147,13 @@ export interface Settings {
       // 分批止盈: close an equal share of the position at each TP target
       // (last target closes the remainder). Off = close all at the first TP.
       splitTakeProfit: boolean;
+      // R-multiple scale-out: R = |entry - stopLoss| (the trade's risk). When
+      // profit reaches `r`×R, close `closePercent`% of the ORIGINAL position.
+      // Works off entry+stop, independent of the signal's own TP prices.
+      rTakeProfit: {
+        enabled: boolean;
+        levels: { r: number; closePercent: number }[];
+      };
     };
     trailing: {
       enabled: boolean;
@@ -199,6 +208,10 @@ export const DEFAULT_SETTINGS: Settings = {
       attachStopLoss: true,
       attachTakeProfit: true,
       splitTakeProfit: true,
+      rTakeProfit: {
+        enabled: false,
+        levels: [{ r: 1, closePercent: 50 }],
+      },
     },
     trailing: {
       enabled: false,

@@ -376,6 +376,10 @@ export async function executeSignal(
           limitPrice ? entryType : "market", limitPrice, refPrice
         );
         const maxAdds = settings.trading.risk.maxAddsPerPosition;
+        const slForRisk = settings.trading.orders.attachStopLoss ? aligned.stopLoss : null;
+        const initialRisk =
+          slForRisk != null ? Math.abs(res.price - slForRisk) : null;
+        const rt = settings.trading.orders.rTakeProfit;
         positions[sym] = {
           symbol: sym,
           side: signal.side,
@@ -384,7 +388,7 @@ export async function executeSignal(
           qty: res.qty,
           originalQty: res.qty,
           sizeUsdt,
-          stopLoss: settings.trading.orders.attachStopLoss ? aligned.stopLoss : null,
+          stopLoss: slForRisk,
           takeProfits: settings.trading.orders.attachTakeProfit
             ? [...aligned.takeProfits].sort((a, b) =>
                 signal.side === "long" ? a - b : b - a)
@@ -395,6 +399,11 @@ export async function executeSignal(
             .map((level) => ({ level, armedAt: null, armed: false })),
           entryOrderType: limitPrice ? entryType : "market",
           beMoved: false,
+          initialRisk,
+          rTargets:
+            rt?.enabled && initialRisk
+              ? rt.levels.map((l) => ({ r: l.r, closePercent: l.closePercent, done: false }))
+              : [],
           orderIds: res.orderIds,
           openedAt: Date.now(),
           addCount: 0,
@@ -631,6 +640,35 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
       }
     }
     pos.pendingAdds = remaining;
+
+    // R-multiple scale-out: at r×R profit, close closePercent% of original qty
+    if (pos.initialRisk && pos.initialRisk > 0 && (pos.rTargets ?? []).length) {
+      const rProfit = ((price - pos.entryPrice) * dir) / pos.initialRisk;
+      for (const t of pos.rTargets) {
+        if (t.done || rProfit < t.r || pos.qty <= 1e-9) continue;
+        const qtyToClose = Math.min(pos.qty, (pos.originalQty * t.closePercent) / 100);
+        if (qtyToClose <= 1e-9) { t.done = true; continue; }
+        try {
+          const ids = await closeQty(client, live, pos, qtyToClose);
+          pos.qty -= qtyToClose;
+          t.done = true;
+          changed = true;
+          actions.push(`${sym}: ${t.r}R 達標，平 ${t.closePercent}% (${qtyToClose.toFixed(6)})`);
+          await record("tp_hit",
+            { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: qtyToClose, price, leverage: pos.leverage },
+            live && !pos.dryRun, true,
+            `R 止盈：達 ${t.r}R (現價 ${price})，平倉 ${t.closePercent}%`, ids);
+        } catch (err) {
+          actions.push(`${sym}: R止盈平倉 FAILED: ${(err as Error).message}`);
+          break;
+        }
+      }
+      if (pos.qty <= 1e-9) {
+        delete positions[sym];
+        actions.push(`${sym}: R 止盈已全數平倉`);
+        continue;
+      }
+    }
 
     // stop-loss: close everything
     if (pos.stopLoss != null && (price - pos.stopLoss) * dir <= 0) {
