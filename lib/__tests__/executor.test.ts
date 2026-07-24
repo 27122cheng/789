@@ -132,15 +132,22 @@ describe("dry-run pipeline", () => {
     expect(positions["ETHUSDT"]).toBeUndefined();
   });
 
-  it("filters news messages and records them", async () => {
+  it("filters news messages silently (no record, no position)", async () => {
     const cfg = settings();
+    const before = (await getSignals()).length;
     await handleIncomingMessage(
       "今晚 CPI 數據公布，BTCUSDT 可能劇烈波動", meta(), cfg
     );
-    const signals = await getSignals();
-    expect(signals[0].action).toBe("filtered");
-    const positions = await getPositions();
-    expect(positions["BTCUSDT"]).toBeUndefined();
+    // non-signals are dropped without any signal record
+    expect((await getSignals()).length).toBe(before);
+    expect((await getPositions())["BTCUSDT"]).toBeUndefined();
+  });
+
+  it("non-signal chatter is not recorded", async () => {
+    const cfg = settings();
+    const before = (await getSignals()).length;
+    await handleIncomingMessage("gm 今天盤整，觀望為主", meta(), cfg);
+    expect((await getSignals()).length).toBe(before);
   });
 
   it("cancel runs silently and purges the trade's records", async () => {

@@ -266,13 +266,8 @@ export async function handleIncomingMessage(
   meta: { chatId: string; messageId: number; timestamp: number },
   settings: Settings
 ): Promise<void> {
-  // 1. noise filter (news, data releases, ads ...)
+  // 1. noise filter (news, data releases, ads ...) - dropped silently, no record
   if (isFiltered(text, settings.filters.ignoreKeywords)) {
-    await appendSignal({
-      at: Date.now(), chatId: meta.chatId, messageId: meta.messageId,
-      action: "filtered", symbol: null, side: null,
-      summary: "matched ignore keyword", rawText: text.slice(0, 500),
-    });
     return;
   }
 
@@ -283,12 +278,7 @@ export async function handleIncomingMessage(
     extraShortKeywords: settings.filters.extraShortKeywords,
   });
   if (!signal) {
-    // unrecognizable chatter - log lightly so the dashboard shows liveness
-    await appendSignal({
-      at: Date.now(), chatId: meta.chatId, messageId: meta.messageId,
-      action: "ignored", symbol: null, side: null,
-      summary: "no trading pair / not a signal", rawText: text.slice(0, 200),
-    });
+    // not a trade signal (chatter / analysis) - dropped silently, no record
     return;
   }
 
