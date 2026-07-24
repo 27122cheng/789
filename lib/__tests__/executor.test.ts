@@ -633,3 +633,38 @@ describe("minimum order size policy", () => {
     expect((await getPositions())["ETHUSDT"]).toBeUndefined();
   });
 });
+
+describe("size step rounding", () => {
+  it("reports when the configured amount was rounded down to the step", async () => {
+    const cfg = settings();
+    cfg.exchange = "okx";
+    cfg.okx = {
+      apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false,
+    };
+    cfg.trading.liveTrading = true;
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.orders.entryType = "market";
+    // 10 USDT at 64000: 0.00015625 BTC, floored to the 0.0001 step = 6.40 USDT
+    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 10, percentBalance: 5 };
+
+    const orders: any[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any[] = [];
+      if (url.includes("/account/config")) data = [{ posMode: "net_mode" }];
+      else if (url.includes("/public/instruments")) {
+        data = [{ instId: "AVAX-USDT-SWAP", ctVal: "0.01", lotSz: "0.01", minSz: "0.01", tickSz: "0.1" }];
+      } else if (url.includes("/market/ticker")) data = [{ last: "64000" }];
+      else if (url.includes("/trade/order")) { orders.push(body); data = [{ ordId: "S-1", sCode: "0" }]; }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+
+    await handleIncomingMessage("AVAXUSDT LONG Entry: 64000 SL: 63000", meta(), cfg);
+
+    expect(orders[0].sz).toBe("0.01");   // one contract-step, not zero
+    const rec = (await getOrders()).find((o) => o.symbol === "AVAXUSDT" && o.success);
+    expect(rec!.message).toContain("向下對齊");
+    expect(rec!.message).toContain("6.40");   // real notional, not the configured 10
+  });
+});

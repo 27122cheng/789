@@ -304,6 +304,18 @@ async function placeEntry(
     liftedNote =
       ` ⚠️ 低於交易所最低下單量，已提高到 ${minSize}` +
       `（實際名目 ${(qty * price).toFixed(2)} USDT，設定為 ${sizeUsdt} USDT）`;
+  } else {
+    // Sizes come in fixed increments, so the configured amount is rounded
+    // DOWN to the next step (never up - that would exceed the intended risk).
+    // On expensive coins one step can be worth several USDT, making the real
+    // position noticeably smaller than configured, so say so.
+    const actual = qty * price;
+    if (actual < sizeUsdt * 0.98) {
+      const step = Math.pow(10, -baseDec);
+      liftedNote =
+        ` ⚠️ 已向下對齊下單階梯（實際名目 ${actual.toFixed(2)} USDT，` +
+        `設定為 ${sizeUsdt} USDT；每階約 ${(step * price).toFixed(2)} USDT）`;
+    }
   }
   const qtyStr = qty.toFixed(baseDec);
 

@@ -58,6 +58,12 @@ export async function GET(req: NextRequest) {
     const lifted = !!(minSize && wantQty < minSize);
     const finalQty = lifted ? minSize! : wantQty;
     const policy = settings.trading.orders.belowMinSize ?? "lift";
+    const finalNotional = finalQty * price;
+    // order sizes come in fixed increments; on expensive coins one increment
+    // is worth several USDT, so the configured amount is rarely reachable
+    const step = Math.pow(10, -baseDec);
+    const stepNotional = step * price;
+    const roundedDown = !lifted && finalNotional < usdt * 0.98;
 
     return NextResponse.json({
       exchange: settings.exchange,
@@ -68,7 +74,15 @@ export async function GET(req: NextRequest) {
       minSizeBase: minSize,
       minNotionalUsdt: minSize != null ? +(minSize * price).toFixed(4) : null,
       finalQtyBase: finalQty,
-      finalNotionalUsdt: +(finalQty * price).toFixed(4),
+      finalNotionalUsdt: +finalNotional.toFixed(4),
+      stepBase: step,
+      stepNotionalUsdt: +stepNotional.toFixed(4),
+      // the amounts actually reachable around what was asked for
+      reachableUsdt: [
+        +(Math.floor(usdt / stepNotional) * stepNotional).toFixed(2),
+        +((Math.floor(usdt / stepNotional) + 1) * stepNotional).toFixed(2),
+      ].filter((v) => v > 0),
+      roundedDown,
       orderUnit: client.describeOrderSize
         ? await client.describeOrderSize(symbol, finalQty).catch(() => null)
         : null,
@@ -82,6 +96,9 @@ export async function GET(req: NextRequest) {
           ? "會跳過這筆訊號（依設定：低於最低量不交易）"
           : lifted
           ? "會以交易所最低量下單（金額大於你設定的）"
+          : roundedDown
+          ? `會向下對齊到 ${finalNotional.toFixed(2)} USDT（下單量只能是每階 ` +
+            `${stepNotional.toFixed(2)} USDT 的整數倍，不會超過你設定的金額）`
           : "會照設定金額下單",
     });
   } catch (e) {

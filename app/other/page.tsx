@@ -140,6 +140,20 @@ export default function OtherPage() {
                     </td>
                   </tr>
                   <tr>
+                    <td>下單階梯（每階）</td>
+                    <td className="mono">
+                      {sizeResult.stepBase}
+                      {sizeResult.stepNotionalUsdt != null
+                        ? `（約 ${sizeResult.stepNotionalUsdt} USDT）` : ""}
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>可下的金額</td>
+                    <td className="mono">
+                      {(sizeResult.reachableUsdt ?? []).join(" 或 ")} USDT …
+                    </td>
+                  </tr>
+                  <tr>
                     <td><b>實際下單量</b></td>
                     <td className="mono">
                       <b>{sizeResult.orderUnit ?? sizeResult.finalQtyBase}</b>
@@ -149,7 +163,7 @@ export default function OtherPage() {
                   <tr>
                     <td><b>實際名目金額</b></td>
                     <td className="mono">
-                      <b style={{ color: sizeResult.lifted ? "var(--red)" : undefined }}>
+                      <b style={{ color: sizeResult.lifted || sizeResult.roundedDown ? "var(--red)" : undefined }}>
                         {sizeResult.finalNotionalUsdt} USDT
                       </b>
                     </td>
