@@ -284,7 +284,16 @@ async function placeEntry(
   const baseDec = f.baseDecimals ?? 6;
   const minSize = entryType === "limit" ? f.minSizeLimit : f.minSizeMarket;
   qty = floorToDecimals(qty, baseDec);
-  if (minSize && qty < minSize) qty = minSize;
+  // The venue's minimum can exceed the configured position size (e.g. OKX's
+  // 0.01 BTC-USDT-SWAP contract is worth ~6.4 USDT). Lifting silently would
+  // put more at risk than the user asked for, so the record says so.
+  let liftedNote = "";
+  if (minSize && qty < minSize) {
+    qty = minSize;
+    liftedNote =
+      ` ⚠️ 低於交易所最低下單量，已提高到 ${minSize}` +
+      `（實際名目 ${(qty * price).toFixed(2)} USDT，設定為 ${sizeUsdt} USDT）`;
+  }
   const qtyStr = qty.toFixed(baseDec);
 
   const apiSide = side === "long" ? "BUY" : "SELL";
@@ -307,7 +316,7 @@ async function placeEntry(
     qty,
     price,
     orderIds: oid ? [oid] : [],
-    note: `${entryType} ${side} order placed (qty ${qtyStr})`,
+    note: `${entryType} ${side} order placed (qty ${qtyStr})${liftedNote}`,
   };
 }
 

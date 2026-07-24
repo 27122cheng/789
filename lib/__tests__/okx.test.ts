@@ -148,3 +148,21 @@ describe("okx market data", () => {
     expect(r).toEqual({ high: 61000, low: 59000 });
   });
 });
+
+describe("okx step decimals", () => {
+  it("handles whole-number size steps (1 contract = 1 coin)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      let data: any[] = [];
+      if (url.includes("/account/config")) data = [{ posMode: "net_mode" }];
+      else if (url.includes("/public/instruments")) {
+        data = [{ instId: "IOST-USDT-SWAP", ctVal: "1", lotSz: "1", minSz: "1", tickSz: "0.000001" }];
+      }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+    const c = new OkxClient("k", "s", "p");
+    const f = await c.orderFilters("IOSTUSDT");
+    expect(f.baseDecimals).toBe(0);      // not null
+    expect(f.minSizeLimit).toBe(1);
+    expect(f.quoteDecimals).toBe(6);
+  });
+});

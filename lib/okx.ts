@@ -24,6 +24,13 @@ import {
 } from "./exchange";
 import { decimalsOf, floorToStep } from "./num";
 
+/** Decimal places of a computed step like 0.0001, without the trailing-zero
+ *  artefacts of toFixed (a whole-number step must yield 0, not null). */
+function stepDecimals(step: number): number | null {
+  const s = step.toFixed(10).replace(/0+$/, "").replace(/\.$/, "");
+  return decimalsOf(s);
+}
+
 export class OkxApiError extends Error {
   code?: string;
   payload?: Record<string, unknown>;
@@ -203,7 +210,7 @@ export class OkxClient implements ExchangeClient {
     const minBase =
       Number.isFinite(ctVal) && Number.isFinite(minSz) ? ctVal * minSz : null;
     return {
-      baseDecimals: baseStep != null ? decimalsOf(baseStep.toFixed(10).replace(/0+$/, "")) : null,
+      baseDecimals: baseStep != null ? stepDecimals(baseStep) : null,
       quoteDecimals: info.tickSz != null ? decimalsOf(info.tickSz) : null,
       minSizeLimit: minBase,
       minSizeMarket: minBase,
