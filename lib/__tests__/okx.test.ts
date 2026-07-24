@@ -166,3 +166,12 @@ describe("okx step decimals", () => {
     expect(f.quoteDecimals).toBe(6);
   });
 });
+
+describe("okx order-size description", () => {
+  it("explains a base quantity in contracts", async () => {
+    stubOkx([]);
+    const c = new OkxClient("k", "s", "p");
+    // 0.5 BTC at 0.01 BTC per contract = 50 contracts
+    expect(await c.describeOrderSize("BTCUSDT", 0.5)).toBe("50.0 張（每張 0.01 BTC）");
+  });
+});

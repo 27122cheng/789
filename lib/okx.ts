@@ -313,6 +313,15 @@ export class OkxClient implements ExchangeClient {
     return { orderId: first.ordId ? String(first.ordId) : null, raw: first };
   }
 
+  async describeOrderSize(symbol: string, baseQty: number): Promise<string | null> {
+    const info = await this.infoFor(symbol);
+    if (!info) return null;
+    const ctVal = Number(info.ctVal);
+    if (!Number.isFinite(ctVal) || ctVal <= 0) return null;
+    const base = String(info.instId).split("-")[0];
+    return `${this.szFromBase(info, baseQty)} 張（每張 ${info.ctVal} ${base}）`;
+  }
+
   async cancelOrder(instId: string, orderId: string): Promise<unknown> {
     return this.request("POST", "/api/v5/trade/cancel-order", {}, {
       instId, ordId: orderId,

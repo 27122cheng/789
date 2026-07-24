@@ -23,6 +23,10 @@ export default function OtherPage() {
   const [probing, setProbing] = useState(false);
   const [authProbeResult, setAuthProbeResult] = useState<any>(null);
   const [authProbing, setAuthProbing] = useState(false);
+  const [sizeCoin, setSizeCoin] = useState("BTCUSDT");
+  const [sizeUsdt, setSizeUsdt] = useState("3");
+  const [sizeResult, setSizeResult] = useState<any>(null);
+  const [sizing, setSizing] = useState(false);
 
   const load = useCallback(async () => {
     const { status, body } = await apiFetch("/api/state");
@@ -60,6 +64,15 @@ export default function OtherPage() {
     setProbeResult(status === 200 ? body : { error: body?.error ?? status });
   }
 
+  async function runSizePreview() {
+    setSizing(true);
+    setSizeResult(null);
+    const q = `?symbol=${encodeURIComponent(sizeCoin.trim())}&usdt=${encodeURIComponent(sizeUsdt)}`;
+    const { status, body } = await apiFetch("/api/size-preview" + q);
+    setSizing(false);
+    setSizeResult(status === 200 ? body : { error: body?.error ?? `HTTP ${status}` });
+  }
+
   async function runAuthProbe() {
     setAuthProbing(true);
     setAuthProbeResult(null);
@@ -84,6 +97,70 @@ export default function OtherPage() {
   return (
     <div>
       <h1>其他</h1>
+
+      <h2>下單量試算（USDT ↔ 張數）</h2>
+      <div className="panel">
+        <p className="hint">
+          交易所以「張」為單位，每個合約的每張面值和最低張數都不同。
+          這裡用你目前設定的交易所查真實規格，算出指定金額實際會下多少量。
+          純查詢，不會下單。
+        </p>
+        <div className="row">
+          <div>
+            <label>幣種</label>
+            <input type="text" value={sizeCoin}
+                   onChange={(e) => setSizeCoin(e.target.value)}
+                   placeholder="BTCUSDT" />
+          </div>
+          <div>
+            <label>金額 (USDT)</label>
+            <input type="number" value={sizeUsdt}
+                   onChange={(e) => setSizeUsdt(e.target.value)} />
+          </div>
+        </div>
+        <button onClick={runSizePreview} disabled={sizing}>
+          {sizing ? "查詢中…" : "試算"}
+        </button>
+        {sizeResult && (
+          sizeResult.error ? (
+            <div className="msg err" style={{ marginTop: 12 }}>{sizeResult.error}</div>
+          ) : (
+            <div style={{ marginTop: 12, overflowX: "auto" }}>
+              <table>
+                <tbody>
+                  <tr><td>交易所合約</td><td className="mono">{sizeResult.venueSymbol}</td></tr>
+                  <tr><td>現價</td><td className="mono">{sizeResult.price}</td></tr>
+                  <tr><td>你輸入的金額</td><td className="mono">{sizeResult.requestedUsdt} USDT</td></tr>
+                  <tr>
+                    <td>交易所最低下單量</td>
+                    <td className="mono">
+                      {sizeResult.minSizeBase ?? "-"}
+                      {sizeResult.minNotionalUsdt != null
+                        ? `（約 ${sizeResult.minNotionalUsdt} USDT）` : ""}
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><b>實際下單量</b></td>
+                    <td className="mono">
+                      <b>{sizeResult.orderUnit ?? sizeResult.finalQtyBase}</b>
+                      {sizeResult.orderUnit ? ` = ${sizeResult.finalQtyBase}` : ""}
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><b>實際名目金額</b></td>
+                    <td className="mono">
+                      <b style={{ color: sizeResult.lifted ? "var(--red)" : undefined }}>
+                        {sizeResult.finalNotionalUsdt} USDT
+                      </b>
+                    </td>
+                  </tr>
+                  <tr><td>結果</td><td>{sizeResult.outcome}</td></tr>
+                </tbody>
+              </table>
+            </div>
+          )
+        )}
+      </div>
 
       <h2>系統通知</h2>
       {state.liveTrading ? (

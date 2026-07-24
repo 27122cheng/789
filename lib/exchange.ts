@@ -50,4 +50,7 @@ export interface ExchangeClient {
   cancelAllOrders(venueSymbol: string): Promise<number>;
   /** Venues where leverage is set per instrument rather than per order. */
   setLeverage?(venueSymbol: string, leverage: number): Promise<void>;
+  /** Human description of how a base quantity maps to the venue's own order
+   *  unit (OKX sells contracts, not coins), for the sizing preview. */
+  describeOrderSize?(symbol: string, baseQty: number): Promise<string | null>;
 }
