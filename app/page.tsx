@@ -155,8 +155,11 @@ export default function Dashboard() {
                     </td>
                     <td>{p.addCount}</td>
                     <td>
-                      {p.pendingEntry ? "⏳ 待進場" : ""}
-                      {p.pendingEntry ? " " : ""}
+                      {p.pendingEntry
+                        ? (p.pendingEntry.mode === "limit_order"
+                            ? "⏳ 掛單中 "
+                            : "⏳ 待進場 ")
+                        : ""}
                       {p.dryRun ? "模擬" : "真實"}
                     </td>
                   </tr>

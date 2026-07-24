@@ -80,10 +80,10 @@ export async function getSettings(): Promise<Settings> {
   if (!stored) return structuredClone(DEFAULT_SETTINGS);
   // deep-merge over defaults so newly added fields get sane values
   const merged = deepMerge(structuredClone(DEFAULT_SETTINGS), stored) as Settings;
-  // migrate the old perp symbol format: Pionex's trade endpoint rejects the
-  // _PERP suffix (it wants base_quote + type=PERP), so drop a trailing _PERP.
-  if (/_PERP$/i.test(merged.pionex.symbolFormat)) {
-    merged.pionex.symbolFormat = merged.pionex.symbolFormat.replace(/_PERP$/i, "");
+  // migrate to the futures trade symbol: the /uapi/v1 perp endpoints want the
+  // _PERP suffix (BTC_USDT_PERP), so append it if an older bare format is stored.
+  if (!/_PERP$/i.test(merged.pionex.symbolFormat)) {
+    merged.pionex.symbolFormat = merged.pionex.symbolFormat + "_PERP";
   }
   return merged;
 }

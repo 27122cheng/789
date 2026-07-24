@@ -52,9 +52,18 @@ export interface Position {
   beMoved: boolean;            // SL already moved to breakeven after TP1
   initialRisk: number | null;  // |entry - stopLoss| at open, for R-multiples
   rTargets: { r: number; closePercent: number; done: boolean }[];
-  // 到價進場: while set, the position hasn't been filled yet - the monitor
-  // enters at market once Pionex's price reaches `target` from `dir`.
-  pendingEntry: { target: number; dir: "up" | "down" } | null;
+  // While set, the position hasn't been filled yet. Two ways of waiting:
+  //   "limit_order" - a REAL limit order rests on Pionex at `target` (orderId
+  //     set); it fills at exactly that price, even between monitor polls.
+  //   "watch" - no exchange order (dry-run, or Pionex rejected the limit);
+  //     the monitor market-enters when price touches `target` (到價進場).
+  pendingEntry: {
+    target: number;
+    dir: "up" | "down";
+    mode: "limit_order" | "watch";
+    orderId: string | null;
+    qty: number;              // size submitted / to submit
+  } | null;
   orderIds: string[];          // pending entry order ids (limit entries)
   openedAt: number;
   addCount: number;
@@ -187,9 +196,9 @@ export const DEFAULT_SETTINGS: Settings = {
     apiKey: "",
     apiSecret: "",
     baseUrl: "https://api.pionex.com",
-    // Pionex perp TRADE symbol = base_quote (no _PERP); market selected by
-    // type=PERP. The _PERP suffix only appears in market-data listings.
-    symbolFormat: "{base}_{quote}",
+    // Pionex perp futures TRADE symbol = base_quote_PERP on the /uapi/v1
+    // endpoints (positionSide=BOTH one-way mode).
+    symbolFormat: "{base}_{quote}_PERP",
   },
   trading: {
     liveTrading: false,
