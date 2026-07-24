@@ -119,6 +119,20 @@ async function fetchPriceSafe(
   }
 }
 
+/** True for Pionex rejections that mean "this account may not trade perps via
+ *  the API at all" (TRADE_TYPE_DENIED / not in whitelist). These are account
+ *  permissions, not order parameters: retrying, resizing or switching to a
+ *  market order cannot help, so the trade must fail loudly rather than fall
+ *  back to a watcher that is guaranteed to fail later. */
+function isPermissionDenied(msg: string): boolean {
+  return /TRADE_TYPE_DENIED|not in whitelist|user denied|PERMISSION|UNAUTHORIZED|FORBIDDEN/i.test(msg);
+}
+
+const PERM_HINT =
+  "（此 Pionex 帳號的 API 未開通「合約 PERP」交易權限：Pionex 的合約 API 需要白名單，" +
+  "一般帳號預設只能用 API 交易現貨。請先到 Pionex 後台確認 API 金鑰有勾選合約權限，" +
+  "若沒有該選項就需要聯繫 Pionex 客服申請開通合約 API。）";
+
 /** Align signal prices to Pionex's price precision per the user's rule:
  *  entry & stop-loss round UP (無條件進位), take-profits round DOWN (無條件縮減).
  *  If the precision can't be determined, values are left unchanged. */
@@ -421,9 +435,19 @@ export async function executeSignal(
                 pendQty = r.qty;
                 note = `已在 Pionex 掛限價單 @ ${aligned.entry}（現價 ${refPrice}）`;
               } catch (err) {
-                // keep the trade alive: watch the price ourselves instead
+                const emsg = (err as Error).message;
+                // An account-permission rejection will hit the market fallback
+                // too, so fail now instead of parking a position that cannot
+                // ever be filled.
+                if (isPermissionDenied(emsg)) {
+                  await record("open",
+                    { symbol: sym, side: signal.side, sizeUsdt, qty: 0, price: aligned.entry, leverage },
+                    live, false, `Pionex 拒絕合約下單：${emsg}${PERM_HINT}`);
+                  return;
+                }
+                // otherwise keep the trade alive: watch the price ourselves
                 note =
-                  `Pionex 掛限價單被拒（${(err as Error).message}）` +
+                  `Pionex 掛限價單被拒（${emsg}）` +
                   `→ 改用到價自動進場 @ ${aligned.entry}（現價 ${refPrice}）`;
               }
             }
@@ -574,6 +598,9 @@ export async function executeSignal(
     if (/AMOUNT_FILTER|MIN_?AMOUNT|MIN_?NOTIONAL|too small/i.test(msg)) {
       msg += "（下單金額低於 Pionex 最低下單額，請到設定調高「固定金額」）";
     }
+    if (isPermissionDenied(msg)) {
+      msg += PERM_HINT;
+    }
     await record(signal.action,
       { symbol: sym, side: signal.side, sizeUsdt: 0, qty: 0, price: null, leverage: 0 },
       live, false, msg);
@@ -671,7 +698,17 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
           { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: res.qty, price: res.price, leverage: pos.leverage },
           live && !pos.dryRun, true, `到價進場 @ ${target}（現價 ${price}）`, res.orderIds);
       } catch (err) {
-        actions.push(`${sym}: 到價進場失敗: ${(err as Error).message}`);
+        const emsg = (err as Error).message;
+        actions.push(`${sym}: 到價進場失敗: ${emsg}`);
+        if (isPermissionDenied(emsg)) {
+          // the account cannot trade perps via API - retrying every tick would
+          // just spam the log, so drop the position and say why once.
+          delete positions[sym];
+          changed = true;
+          await record("open",
+            { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: 0, price: target, leverage: pos.leverage },
+            live && !pos.dryRun, false, `到價但 Pionex 拒絕下單：${emsg}${PERM_HINT}`);
+        }
       }
       continue; // just entered (or failed) - don't run SL/TP this tick
     }
