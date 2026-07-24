@@ -512,9 +512,13 @@ export async function executeSignal(
     }
   } catch (err) {
     // PionexApiError.message already carries the "Pionex API error ..." prefix
-    const msg = err instanceof PionexApiError
+    let msg = err instanceof PionexApiError
       ? err.message
       : `execution failed: ${(err as Error).message}`;
+    // add a plain-language hint for the common min-order-size rejection
+    if (/AMOUNT_FILTER|MIN_?AMOUNT|MIN_?NOTIONAL|too small/i.test(msg)) {
+      msg += "（下單金額低於 Pionex 最低下單額，請到設定調高「固定金額」）";
+    }
     await record(signal.action,
       { symbol: sym, side: signal.side, sizeUsdt: 0, qty: 0, price: null, leverage: 0 },
       live, false, msg);
