@@ -18,6 +18,12 @@ export default function SettingsPage() {
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
   const [baseUrl, setBaseUrl] = useState("https://api.pionex.com");
+  const [exchange, setExchange] = useState("okx");
+  const [okxKey, setOkxKey] = useState("");
+  const [okxSecret, setOkxSecret] = useState("");
+  const [okxPass, setOkxPass] = useState("");
+  const [okxTdMode, setOkxTdMode] = useState("cross");
+  const [okxDemo, setOkxDemo] = useState(false);
   const [symbolFormat, setSymbolFormat] = useState("{base}_{quote}");
   const [liveTrading, setLiveTrading] = useState(false);
   const [sizingMode, setSizingMode] = useState("fixed_usdt");
@@ -60,6 +66,12 @@ export default function SettingsPage() {
     setBotToken(s.telegram.botToken ?? "");
     setAllowedChats((s.telegram.allowedChats ?? []).join(", "));
     setReactToEdits(!!s.telegram.reactToEdits);
+    setExchange(s.exchange ?? "okx");
+    setOkxKey(s.okx?.apiKey ?? "");
+    setOkxSecret(s.okx?.apiSecret ?? "");
+    setOkxPass(s.okx?.passphrase ?? "");
+    setOkxTdMode(s.okx?.tdMode ?? "cross");
+    setOkxDemo(!!s.okx?.demo);
     setApiKey(s.pionex.apiKey ?? "");
     setApiSecret(s.pionex.apiSecret ?? "");
     setBaseUrl(s.pionex.baseUrl ?? "https://api.pionex.com");
@@ -112,6 +124,11 @@ export default function SettingsPage() {
           botToken,
           allowedChats: splitList(allowedChats),
           reactToEdits,
+        },
+        exchange,
+        okx: {
+          apiKey: okxKey, apiSecret: okxSecret, passphrase: okxPass,
+          tdMode: okxTdMode, demo: okxDemo,
         },
         pionex: { apiKey, apiSecret, baseUrl, symbolFormat },
         trading: {
@@ -224,6 +241,58 @@ export default function SettingsPage() {
       </div>
 
       <div className="panel">
+        <h2 style={{ marginTop: 0 }}>交易所</h2>
+        <p className="hint">
+          Pionex 的合約 API 需要白名單，一般帳號會被拒（TRADE_TYPE_DENIED）；
+          OKX 的合約 API 對一般帳號開放，建議用 OKX。
+        </p>
+        <label>下單交易所</label>
+        <select value={exchange} onChange={(e) => setExchange(e.target.value)}>
+          <option value="okx">OKX（合約，建議）</option>
+          <option value="pionex">Pionex（需合約 API 白名單）</option>
+        </select>
+      </div>
+
+      {exchange === "okx" && (
+        <div className="panel">
+          <h2 style={{ marginTop: 0 }}>OKX API</h2>
+          <p className="hint">
+            OKX →「API」建立金鑰，權限勾選<b>交易</b>（不要勾提現）。
+            建立時你自己設定的 <b>Passphrase</b> 一定要記下來，這裡要填。
+            IP 白名單建議先留空（Vercel 的出口 IP 不固定）。
+          </p>
+          <div className="row">
+            <div>
+              <label>API Key</label>
+              <input type="text" value={okxKey} onChange={(e) => setOkxKey(e.target.value)} />
+            </div>
+            <div>
+              <label>API Secret</label>
+              <input type="password" value={okxSecret} onChange={(e) => setOkxSecret(e.target.value)} />
+            </div>
+          </div>
+          <div className="row">
+            <div>
+              <label>Passphrase（建立金鑰時自己設的密碼）</label>
+              <input type="password" value={okxPass} onChange={(e) => setOkxPass(e.target.value)} />
+            </div>
+            <div>
+              <label>保證金模式</label>
+              <select value={okxTdMode} onChange={(e) => setOkxTdMode(e.target.value)}>
+                <option value="cross">全倉 cross</option>
+                <option value="isolated">逐倉 isolated</option>
+              </select>
+            </div>
+          </div>
+          <div className="checkbox">
+            <input type="checkbox" id="okxdemo" checked={okxDemo}
+                   onChange={(e) => setOkxDemo(e.target.checked)} />
+            <label htmlFor="okxdemo">使用 OKX 模擬盤（Demo Trading，用模擬盤金鑰）</label>
+          </div>
+        </div>
+      )}
+
+      <div className="panel" style={{ display: exchange === "pionex" ? undefined : "none" }}>
         <h2 style={{ marginTop: 0 }}>Pionex API</h2>
         <p className="hint">在 Pionex 的 API 管理建立金鑰；只開交易權限，不要開提現。</p>
         <div className="row">

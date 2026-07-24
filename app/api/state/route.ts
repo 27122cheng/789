@@ -22,18 +22,21 @@ export async function GET(req: NextRequest) {
     getOrders(),
   ]);
 
+  const exchangeKeys =
+    settings.exchange === "okx"
+      ? !!settings.okx.apiKey && !!settings.okx.apiSecret && !!settings.okx.passphrase
+      : !!settings.pionex.apiKey && !!settings.pionex.apiSecret;
+
   return NextResponse.json({
     authMode: await adminAuthMode(),
-    liveTrading:
-      settings.trading.liveTrading &&
-      !!settings.pionex.apiKey &&
-      !!settings.pionex.apiSecret,
+    exchange: settings.exchange,
+    liveTrading: settings.trading.liveTrading && exchangeKeys,
     trailingEnabled: settings.trading.trailing.enabled,
     durableStore: hasDurableStore(),
     configured: {
       telegramBot: !!settings.telegram.botToken,
       allowedChats: settings.telegram.allowedChats.length,
-      pionexKeys: !!settings.pionex.apiKey && !!settings.pionex.apiSecret,
+      pionexKeys: exchangeKeys,
     },
     positions,
     signals: signals.slice(0, 100),

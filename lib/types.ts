@@ -113,6 +113,18 @@ export interface WebhookEvent {
 }
 
 export interface Settings {
+  /** Which venue orders are sent to. Pionex gates perpetual-futures API
+   *  trading behind a whitelist (TRADE_TYPE_DENIED for normal accounts);
+   *  OKX's swap API is open to regular accounts. */
+  exchange: "pionex" | "okx";
+  okx: {
+    apiKey: string;
+    apiSecret: string;
+    passphrase: string;        // OKX requires a 3rd credential
+    baseUrl: string;
+    tdMode: "cross" | "isolated";
+    demo: boolean;             // demo (paper) trading endpoint
+  };
   telegram: {
     botToken: string;
     // chat usernames (without @) or numeric chat ids; empty = reject all
@@ -186,6 +198,15 @@ export interface Settings {
 }
 
 export const DEFAULT_SETTINGS: Settings = {
+  exchange: "okx",
+  okx: {
+    apiKey: "",
+    apiSecret: "",
+    passphrase: "",
+    baseUrl: "https://www.okx.com",
+    tdMode: "cross",
+    demo: false,
+  },
   telegram: {
     botToken: "",
     allowedChats: [],

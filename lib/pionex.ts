@@ -18,6 +18,16 @@
  *   5. headers: PIONEX-KEY, PIONEX-SIGNATURE
  */
 import { createHmac } from "node:crypto";
+import {
+  ExchangeClient,
+  OrderFilters,
+  PlaceOrderOpts,
+  PlacedOrder,
+} from "./exchange";
+import { ceilToDecimals, decimalsOf, floorToDecimals } from "./num";
+
+// re-exported so existing importers (and tests) keep working
+export { ceilToDecimals, decimalsOf, floorToDecimals };
 
 export class PionexApiError extends Error {
   status?: number;
@@ -65,26 +75,6 @@ export function signRequest(
   return createHmac("sha256", apiSecret).update(message).digest("hex");
 }
 
-/** Number of decimal places implied by a numeric string like "0.001" -> 3. */
-export function decimalsOf(v: string | number): number | null {
-  const s = String(v);
-  if (!/^\d*\.?\d+$/.test(s)) return null;
-  const i = s.indexOf(".");
-  return i === -1 ? 0 : s.length - i - 1;
-}
-
-/** Round UP to `decimals` places (無條件進位), fp-safe. */
-export function ceilToDecimals(v: number, decimals: number): number {
-  const f = Math.pow(10, decimals);
-  return Math.ceil(v * f - 1e-9) / f;
-}
-
-/** Round DOWN to `decimals` places (無條件縮減/捨去), fp-safe. */
-export function floorToDecimals(v: number, decimals: number): number {
-  const f = Math.pow(10, decimals);
-  return Math.floor(v * f + 1e-9) / f;
-}
-
 export function toPerpSymbol(
   symbol: string,
   format = "{base}_{quote}"
@@ -102,7 +92,7 @@ export function toPerpSymbol(
   return format.replace("{base}", base).replace("{quote}", quote);
 }
 
-export class PionexClient {
+export class PionexClient implements ExchangeClient {
   constructor(
     private apiKey: string,
     private apiSecret: string,
@@ -223,13 +213,7 @@ export class PionexClient {
   }
 
   /** Order filters (step sizes + minimum order size) for a symbol. */
-  async orderFilters(symbol: string): Promise<{
-    baseDecimals: number | null;   // qty decimal places (from baseStep/precision)
-    quoteDecimals: number | null;  // price decimal places (from quoteStep/precision)
-    minSizeLimit: number | null;
-    minSizeMarket: number | null;
-    minNotional: number | null;
-  }> {
+  async orderFilters(symbol: string): Promise<OrderFilters> {
     const info = this.infoFor(symbol, await this.loadSymbolInfo().catch(() => ({})));
     if (!info)
       return { baseDecimals: null, quoteDecimals: null, minSizeLimit: null, minSizeMarket: null, minNotional: null };
@@ -350,16 +334,7 @@ export class PionexClient {
     return payload?.data?.orders ?? [];
   }
 
-  async placeOrder(opts: {
-    symbol: string;                 // perp symbol e.g. BTC_USDT_PERP
-    side: "BUY" | "SELL";
-    type: "MARKET" | "LIMIT";
-    size?: string;                  // base qty (futures orders are size-based)
-    amount?: string;                // quote amount (rarely used on perp)
-    price?: string;                 // LIMIT only
-    reduceOnly?: boolean;           // set on closes
-    clientOrderId?: string;
-  }): Promise<Record<string, any>> {
+  async placeOrder(opts: PlaceOrderOpts): Promise<PlacedOrder> {
     const body: Record<string, unknown> = {
       symbol: opts.symbol,
       positionSide: "BOTH",         // one-way mode
@@ -367,11 +342,12 @@ export class PionexClient {
       type: opts.type,
     };
     if (opts.size !== undefined) body.size = opts.size;
-    if (opts.amount !== undefined) body.amount = opts.amount;
     if (opts.price !== undefined) body.price = opts.price;
     if (opts.reduceOnly) body.reduceOnly = true;
     if (opts.clientOrderId) body.clientOrderId = opts.clientOrderId;
-    return this.signed("POST", FUTURES.order, {}, body);
+    const resp = await this.signed("POST", FUTURES.order, {}, body);
+    const oid = resp?.data?.orderId;
+    return { orderId: oid ? String(oid) : null, raw: resp };
   }
 
   async cancelOrder(symbol: string, orderId: string): Promise<Record<string, any>> {

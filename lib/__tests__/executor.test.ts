@@ -13,6 +13,9 @@ function settings(): Settings {
   const s = structuredClone(DEFAULT_SETTINGS) as Settings;
   s.telegram.allowedChats = ["-100123"];
   s.trading.liveTrading = false;
+  // these cases stub Pionex-shaped responses; the OKX path is covered
+  // separately below and in okx.test.ts
+  s.exchange = "pionex";
   return s;
 }
 
@@ -180,8 +183,8 @@ describe("dry-run pipeline", () => {
     expect(placed[0].price).toBe("60000.0000");
     expect(placed[0].positionSide).toBe("BOTH");
     let pos = (await getPositions())["XRPUSDT"];
-    expect(pos.pendingEntry.mode).toBe("limit_order");
-    expect(pos.pendingEntry.orderId).toBe("OID-1");
+    expect(pos.pendingEntry!.mode).toBe("limit_order");
+    expect(pos.pendingEntry!.orderId).toBe("OID-1");
     expect(pos.qty).toBe(0);
 
     // while the order is still resting, nothing changes
@@ -232,7 +235,7 @@ describe("dry-run pipeline", () => {
       "ADAUSDT LONG Entry: 60000 SL: 59000 TP1: 61000", meta(), cfg
     );
     let pos = (await getPositions())["ADAUSDT"];
-    expect(pos.pendingEntry.mode).toBe("watch");
+    expect(pos.pendingEntry!.mode).toBe("watch");
 
     // last price never reaches 60000, but the candle low wicked through it
     price = 60300;
@@ -241,6 +244,49 @@ describe("dry-run pipeline", () => {
     pos = (await getPositions())["ADAUSDT"];
     expect(pos.pendingEntry).toBeNull();
     expect(pos.qty).toBeGreaterThan(0);
+  });
+
+  it("OKX: a live signal places a swap order sized in contracts", async () => {
+    const cfg = settings();
+    cfg.exchange = "okx";
+    cfg.okx = {
+      apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false,
+    };
+    cfg.trading.liveTrading = true;
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.orders.entryType = "market";
+    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 600, percentBalance: 5 };
+
+    const orders: any[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any[] = [];
+      if (url.includes("/public/instruments")) {
+        data = [{ instId: "LINK-USDT-SWAP", ctVal: "0.1", lotSz: "0.1", minSz: "0.1", tickSz: "0.001" }];
+      } else if (url.includes("/market/ticker")) {
+        data = [{ last: "3000" }];
+      } else if (url.includes("/account/set-leverage")) {
+        data = [{ lever: "10" }];
+      } else if (url.includes("/trade/order")) {
+        orders.push(body);
+        data = [{ ordId: "OKX-1", sCode: "0" }];
+      }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+
+    await handleIncomingMessage(
+      "LINKUSDT LONG 10x Entry: 3000 SL: 2900 TP1: 3100", meta(), cfg
+    );
+
+    const pos = (await getPositions())["LINKUSDT"];
+    expect(pos).toBeDefined();
+    expect(pos.dryRun).toBe(false);
+    expect(orders).toHaveLength(1);
+    // 600 USDT / 3000 = 0.2 LINK -> 0.2 / 0.1 per contract = 2 contracts
+    expect(orders[0].instId).toBe("LINK-USDT-SWAP");
+    expect(orders[0].sz).toBe("2.0");
+    expect(orders[0].side).toBe("buy");
   });
 
   it("R-multiple scale-out closes the configured % at r×R profit", async () => {
@@ -273,6 +319,7 @@ describe("dry-run pipeline", () => {
     cfg.trading.risk.cooldownSeconds = 0;
     cfg.trading.trailing = {
       enabled: true, activateProfitPercent: 1, callbackPercent: 1,
+      moveToBreakevenOnTp1: false, breakevenOffsetPercent: 0.2,
     };
 
     await handleIncomingMessage(

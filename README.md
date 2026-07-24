@@ -1,6 +1,16 @@
-# Telegram → Pionex 合約自動交易
+# Telegram → OKX / Pionex 合約自動交易
 
-監控 Telegram 群組／頻道的交易信號（支援中英文混合格式），自動在 Pionex 執行合約交易。支援的信號動作：
+監控 Telegram 群組／頻道的交易信號（支援中英文混合格式），自動執行永續合約交易。
+
+**交易所**：設定頁可切換 **OKX**（預設，建議）或 **Pionex**。
+Pionex 的合約 API 需要白名單，一般帳號下單會收到
+`TRADE_TYPE_DENIED: user denied not in whitelist`；OKX 的合約 API 對一般帳號開放。
+訊號解析、加倉、R 倍止盈、移動止損等邏輯與交易所無關，換交易所不影響。
+
+> **OKX 合約以「張」計價**：1 張 BTC-USDT-SWAP = 0.01 BTC（`ctVal`）。
+> 系統內部一律以幣的數量計算，只在 `lib/okx.ts` 的 `szFromBase()` 換算成張數。
+
+支援的信號動作：
 
 | 動作 | 範例訊息 |
 |------|---------|

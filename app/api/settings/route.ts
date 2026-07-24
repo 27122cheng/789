@@ -28,6 +28,9 @@ export async function GET(req: NextRequest) {
   safe.telegram.botToken = masked(settings.telegram.botToken);
   safe.pionex.apiKey = masked(settings.pionex.apiKey);
   safe.pionex.apiSecret = masked(settings.pionex.apiSecret);
+  safe.okx.apiKey = masked(settings.okx.apiKey);
+  safe.okx.apiSecret = masked(settings.okx.apiSecret);
+  safe.okx.passphrase = masked(settings.okx.passphrase);
   safe.telegram.webhookSecret = settings.telegram.webhookSecret ? "(set)" : "";
   const origin = req.headers.get("x-forwarded-host")
     ? `https://${req.headers.get("x-forwarded-host")}`
@@ -76,6 +79,20 @@ export async function POST(req: NextRequest) {
       next.pionex.baseUrl = p.baseUrl.trim();
     if (typeof p.symbolFormat === "string" && p.symbolFormat.includes("{base}"))
       next.pionex.symbolFormat = p.symbolFormat.trim();
+  }
+  if (body.exchange === "okx" || body.exchange === "pionex") {
+    next.exchange = body.exchange;
+  }
+  if (body.okx) {
+    const o = body.okx;
+    const keep = (v: unknown) =>
+      typeof v === "string" && v && !v.includes("****");
+    if (keep(o.apiKey)) next.okx.apiKey = o.apiKey!.trim();
+    if (keep(o.apiSecret)) next.okx.apiSecret = o.apiSecret!.trim();
+    if (keep(o.passphrase)) next.okx.passphrase = o.passphrase!.trim();
+    if (typeof o.baseUrl === "string" && o.baseUrl) next.okx.baseUrl = o.baseUrl.trim();
+    if (o.tdMode === "cross" || o.tdMode === "isolated") next.okx.tdMode = o.tdMode;
+    if (typeof o.demo === "boolean") next.okx.demo = o.demo;
   }
   if (body.trading) next.trading = { ...next.trading, ...body.trading };
   if (body.filters) next.filters = { ...next.filters, ...body.filters };

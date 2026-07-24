@@ -10,12 +10,10 @@
  * stop orders - but it is only as granular as how often the monitor runs.
  */
 import { parseSignal, dedupKey, isFiltered } from "./parser";
-import {
-  PionexApiError,
-  PionexClient,
-  ceilToDecimals,
-  floorToDecimals,
-} from "./pionex";
+import { ExchangeClient } from "./exchange";
+import { ceilToDecimals, floorToDecimals } from "./num";
+import { PionexApiError, PionexClient } from "./pionex";
+import { OkxClient } from "./okx";
 import {
   appendOrder,
   appendSignal,
@@ -28,7 +26,17 @@ import {
 } from "./store";
 import { OrderRecord, ParsedSignal, Position, Settings } from "./types";
 
-function makeClient(settings: Settings): PionexClient {
+function makeClient(settings: Settings): ExchangeClient {
+  if (settings.exchange === "okx") {
+    return new OkxClient(
+      settings.okx.apiKey,
+      settings.okx.apiSecret,
+      settings.okx.passphrase,
+      settings.okx.baseUrl,
+      settings.okx.tdMode,
+      settings.okx.demo
+    );
+  }
   return new PionexClient(
     settings.pionex.apiKey,
     settings.pionex.apiSecret,
@@ -37,12 +45,16 @@ function makeClient(settings: Settings): PionexClient {
   );
 }
 
+/** True when orders should really be sent: live mode + the selected venue's
+ *  credentials are all present (OKX additionally needs a passphrase). */
 function isLive(settings: Settings): boolean {
-  return (
-    settings.trading.liveTrading &&
-    !!settings.pionex.apiKey &&
-    !!settings.pionex.apiSecret
-  );
+  if (!settings.trading.liveTrading) return false;
+  if (settings.exchange === "okx") {
+    return (
+      !!settings.okx.apiKey && !!settings.okx.apiSecret && !!settings.okx.passphrase
+    );
+  }
+  return !!settings.pionex.apiKey && !!settings.pionex.apiSecret;
 }
 
 async function record(
@@ -82,7 +94,7 @@ async function record(
 async function computeSizeUsdt(
   settings: Settings,
   signal: ParsedSignal,
-  client: PionexClient,
+  client: ExchangeClient,
   live: boolean,
   forAdd: boolean
 ): Promise<number> {
@@ -108,7 +120,7 @@ function computeLeverage(settings: Settings, signal: ParsedSignal): number {
 }
 
 async function fetchPriceSafe(
-  client: PionexClient,
+  client: ExchangeClient,
   symbol: string,
   fallback: number | null
 ): Promise<number | null> {
@@ -128,16 +140,24 @@ function isPermissionDenied(msg: string): boolean {
   return /TRADE_TYPE_DENIED|not in whitelist|user denied|PERMISSION|UNAUTHORIZED|FORBIDDEN/i.test(msg);
 }
 
-const PERM_HINT =
-  "（此 Pionex 帳號的 API 未開通「合約 PERP」交易權限：Pionex 的合約 API 需要白名單，" +
-  "一般帳號預設只能用 API 交易現貨。請先到 Pionex 後台確認 API 金鑰有勾選合約權限，" +
-  "若沒有該選項就需要聯繫 Pionex 客服申請開通合約 API。）";
+function permHint(settings: Settings): string {
+  if (settings.exchange === "okx") {
+    return (
+      "（OKX 拒絕此金鑰下單：請確認 API 金鑰有勾選「交易」權限、Passphrase 正確、" +
+      "IP 白名單有包含 Vercel（或先留空不限制），且帳戶已開通合約交易。）"
+    );
+  }
+  return (
+    "（此 Pionex 帳號的 API 未開通「合約 PERP」交易權限：Pionex 的合約 API 需要白名單，" +
+    "一般帳號預設只能用 API 交易現貨。建議改用 OKX，其合約 API 對一般帳號開放。）"
+  );
+}
 
 /** Align signal prices to Pionex's price precision per the user's rule:
  *  entry & stop-loss round UP (無條件進位), take-profits round DOWN (無條件縮減).
  *  If the precision can't be determined, values are left unchanged. */
 async function alignPrices(
-  client: PionexClient,
+  client: ExchangeClient,
   symbol: string,
   p: { entry?: number | null; stopLoss?: number | null; takeProfits?: number[] }
 ): Promise<{ entry: number | null; stopLoss: number | null; takeProfits: number[] }> {
@@ -196,14 +216,15 @@ function riskReject(
 
 // --------------------------------------------------------------- open / add
 async function placeEntry(
-  client: PionexClient,
+  client: ExchangeClient,
   live: boolean,
   symbol: string,
   side: "long" | "short",
   sizeUsdt: number,
   entryType: "market" | "limit",
   limitPrice: number | null,
-  refPrice: number | null
+  refPrice: number | null,
+  leverage?: number
 ): Promise<{ qty: number; price: number; orderIds: string[]; note: string }> {
   const perp = client.perpSymbol(symbol);
   const price = limitPrice ?? refPrice;
@@ -219,8 +240,16 @@ async function placeEntry(
     };
   }
 
+  // Venues where leverage is an instrument setting (OKX) need it applied
+  // before the order, otherwise the position uses whatever was set last.
+  if (leverage && client.setLeverage) {
+    await client.setLeverage(perp, leverage).catch(() => {
+      /* non-fatal: the order still goes out at the account's current leverage */
+    });
+  }
+
   // Snap quantity to the contract's size step (round down) and lift it to the
-  // minimum order size, so it passes Pionex's SIZE filter.
+  // minimum order size, so it passes the venue's SIZE filter.
   const f = await client.orderFilters(symbol);
   const baseDec = f.baseDecimals ?? 6;
   const minSize = entryType === "limit" ? f.minSizeLimit : f.minSizeMarket;
@@ -243,7 +272,7 @@ async function placeEntry(
       symbol: perp, side: apiSide, type: "MARKET", size: qtyStr,
     });
   }
-  const oid = String(resp?.data?.orderId ?? "");
+  const oid = resp.orderId;
   return {
     qty,
     price,
@@ -253,7 +282,7 @@ async function placeEntry(
 }
 
 async function closeQty(
-  client: PionexClient,
+  client: ExchangeClient,
   live: boolean,
   pos: Position,
   qty: number
@@ -269,8 +298,7 @@ async function closeQty(
   const resp = await client.placeOrder({
     symbol: perp, side: apiSide, type: "MARKET", size: sizeStr, reduceOnly: true,
   });
-  const oid = String(resp?.data?.orderId ?? "");
-  return oid ? [oid] : [];
+  return resp.orderId ? [resp.orderId] : [];
 }
 
 // ------------------------------------------------------------ main handler
@@ -428,7 +456,7 @@ export async function executeSignal(
             if (live) {
               try {
                 const r = await placeEntry(
-                  client, true, sym, signal.side, sizeUsdt, "limit", aligned.entry, refPrice
+                  client, true, sym, signal.side, sizeUsdt, "limit", aligned.entry, refPrice, leverage
                 );
                 mode = "limit_order";
                 orderId = r.orderIds[0] ?? null;
@@ -442,7 +470,7 @@ export async function executeSignal(
                 if (isPermissionDenied(emsg)) {
                   await record("open",
                     { symbol: sym, side: signal.side, sizeUsdt, qty: 0, price: aligned.entry, leverage },
-                    live, false, `Pionex 拒絕合約下單：${emsg}${PERM_HINT}`);
+                    live, false, `Pionex 拒絕合約下單：${emsg}${permHint(settings)}`);
                   return;
                 }
                 // otherwise keep the trade alive: watch the price ourselves
@@ -472,7 +500,7 @@ export async function executeSignal(
 
         // otherwise fill now at market
         const res = await placeEntry(
-          client, live, sym, signal.side, sizeUsdt, "market", null, refPrice ?? aligned.entry
+          client, live, sym, signal.side, sizeUsdt, "market", null, refPrice ?? aligned.entry, leverage
         );
         const initialRisk =
           slForRisk != null ? Math.abs(res.price - slForRisk) : null;
@@ -499,7 +527,7 @@ export async function executeSignal(
         const sizeUsdt = await computeSizeUsdt(settings, signal, client, live, true);
         const refPrice = await fetchPriceSafe(client, sym, signal.entryPrice ?? p.entryPrice);
         const res = await placeEntry(
-          client, live && !p.dryRun, sym, p.side, sizeUsdt, "market", null, refPrice
+          client, live && !p.dryRun, sym, p.side, sizeUsdt, "market", null, refPrice, p.leverage
         );
         const newQty = p.qty + res.qty;
         p.entryPrice = (p.entryPrice * p.qty + res.price * res.qty) / newQty;
@@ -599,7 +627,7 @@ export async function executeSignal(
       msg += "（下單金額低於 Pionex 最低下單額，請到設定調高「固定金額」）";
     }
     if (isPermissionDenied(msg)) {
-      msg += PERM_HINT;
+      msg += permHint(settings);
     }
     await record(signal.action,
       { symbol: sym, side: signal.side, sizeUsdt: 0, qty: 0, price: null, leverage: 0 },
@@ -685,7 +713,7 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
       if (!reached) continue; // keep waiting
       try {
         const res = await placeEntry(
-          client, live && !pos.dryRun, sym, pos.side, pos.sizeUsdt, "market", null, price
+          client, live && !pos.dryRun, sym, pos.side, pos.sizeUsdt, "market", null, price, pos.leverage
         );
         pos.entryPrice = res.price;
         pos.qty = res.qty;
@@ -707,7 +735,7 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
           changed = true;
           await record("open",
             { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: 0, price: target, leverage: pos.leverage },
-            live && !pos.dryRun, false, `到價但 Pionex 拒絕下單：${emsg}${PERM_HINT}`);
+            live && !pos.dryRun, false, `到價但 Pionex 拒絕下單：${emsg}${permHint(settings)}`);
         }
       }
       continue; // just entered (or failed) - don't run SL/TP this tick
@@ -791,7 +819,7 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
       try {
         const res = await placeEntry(
           client, live && !pos.dryRun, sym, pos.side, addUsdt,
-          "market", null, add.level
+          "market", null, add.level, pos.leverage
         );
         const newQty = pos.qty + res.qty;
         pos.entryPrice = (pos.entryPrice * pos.qty + res.price * res.qty) / newQty;

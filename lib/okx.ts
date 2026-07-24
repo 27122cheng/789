@@ -1,0 +1,300 @@
+/**
+ * OKX v5 REST client for USDT-margined perpetual swaps.
+ *
+ * Auth (per OKX docs):
+ *   prehash   = OK-ACCESS-TIMESTAMP + METHOD + requestPath(+query) + body
+ *   signature = base64(HMAC_SHA256(apiSecret, prehash))
+ *   headers   = OK-ACCESS-KEY / -SIGN / -TIMESTAMP / -PASSPHRASE
+ *   timestamp = ISO-8601 with milliseconds, e.g. 2020-12-08T09:08:57.715Z
+ * Demo trading adds the header x-simulated-trading: 1.
+ *
+ * IMPORTANT - contract sizing: for SWAP instruments OKX denominates `sz` in
+ * CONTRACTS, not coins. One BTC-USDT-SWAP contract is 0.01 BTC (ctVal). The
+ * executor works in base-asset quantities, so this client converts
+ * base -> contracts (and the instrument's limits back to base units) at its
+ * boundary. Getting this backwards would size an order 100x wrong, so the
+ * conversion lives in exactly one place: szFromBase().
+ */
+import { createHmac } from "node:crypto";
+import {
+  ExchangeClient,
+  OrderFilters,
+  PlaceOrderOpts,
+  PlacedOrder,
+} from "./exchange";
+import { decimalsOf, floorToStep } from "./num";
+
+export class OkxApiError extends Error {
+  code?: string;
+  payload?: Record<string, unknown>;
+  constructor(message: string, code?: string, payload?: Record<string, unknown>) {
+    super(message);
+    this.code = code;
+    this.payload = payload;
+  }
+}
+
+/** "BTCUSDT" -> "BTC-USDT-SWAP" */
+export function toOkxInstId(symbol: string): string {
+  const s = symbol.toUpperCase().replace(/[-/_]/g, "");
+  let base = s;
+  let quote = "USDT";
+  for (const q of ["USDT", "USDC", "USD"]) {
+    if (s.endsWith(q) && s.length > q.length) {
+      base = s.slice(0, -q.length);
+      quote = q;
+      break;
+    }
+  }
+  return `${base}-${quote}-SWAP`;
+}
+
+export function okxSign(
+  apiSecret: string,
+  timestamp: string,
+  method: string,
+  requestPath: string,
+  body: string
+): string {
+  return createHmac("sha256", apiSecret)
+    .update(timestamp + method.toUpperCase() + requestPath + body)
+    .digest("base64");
+}
+
+export class OkxClient implements ExchangeClient {
+  constructor(
+    private apiKey: string,
+    private apiSecret: string,
+    private passphrase: string,
+    private baseUrl: string = "https://www.okx.com",
+    /** cross | isolated - margin mode used for every order */
+    private tdMode: string = "cross",
+    /** demo (paper) trading endpoint */
+    private demo: boolean = false
+  ) {
+    this.baseUrl = baseUrl.replace(/\/+$/, "");
+  }
+
+  perpSymbol(symbol: string): string {
+    return toOkxInstId(symbol);
+  }
+
+  private async request(
+    method: string,
+    path: string,
+    query: Record<string, string> = {},
+    body?: Record<string, unknown>
+  ): Promise<any[]> {
+    const qs = Object.keys(query)
+      .map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(query[k])}`)
+      .join("&");
+    const requestPath = qs ? `${path}?${qs}` : path;
+    const bodyStr = body === undefined ? "" : JSON.stringify(body);
+    const timestamp = new Date().toISOString().replace(/\.(\d{3})\d*Z$/, ".$1Z");
+
+    const headers: Record<string, string> = {
+      "OK-ACCESS-KEY": this.apiKey,
+      "OK-ACCESS-SIGN": okxSign(this.apiSecret, timestamp, method, requestPath, bodyStr),
+      "OK-ACCESS-TIMESTAMP": timestamp,
+      "OK-ACCESS-PASSPHRASE": this.passphrase,
+      "Content-Type": "application/json",
+    };
+    if (this.demo) headers["x-simulated-trading"] = "1";
+
+    const resp = await fetch(`${this.baseUrl}${requestPath}`, {
+      method: method.toUpperCase(),
+      headers,
+      body: bodyStr === "" ? undefined : bodyStr,
+      cache: "no-store",
+    });
+    let payload: Record<string, any>;
+    try {
+      payload = await resp.json();
+    } catch {
+      throw new OkxApiError(`non-JSON response (HTTP ${resp.status})`);
+    }
+    // OKX reports business failures with code != "0" and HTTP 200.
+    if (payload.code !== undefined && String(payload.code) !== "0") {
+      const first = Array.isArray(payload.data) ? payload.data[0] : null;
+      const detail = first?.sMsg || payload.msg || "";
+      const code = first?.sCode || String(payload.code);
+      throw new OkxApiError(`OKX API error (${code}): ${detail}`, code, payload);
+    }
+    return Array.isArray(payload.data) ? payload.data : [];
+  }
+
+  // ------------------------------------------------- instrument catalogue
+  private instruments: Record<string, any> | null = null;
+
+  private async loadInstruments(): Promise<Record<string, any>> {
+    if (this.instruments) return this.instruments;
+    const rows = await this.request("GET", "/api/v5/public/instruments", {
+      instType: "SWAP",
+    });
+    const map: Record<string, any> = {};
+    for (const r of rows) if (r?.instId) map[r.instId] = r;
+    this.instruments = map;
+    return map;
+  }
+
+  private async infoFor(symbolLike: string): Promise<any | null> {
+    const instId = /-SWAP$/i.test(symbolLike) ? symbolLike : this.perpSymbol(symbolLike);
+    try {
+      return (await this.loadInstruments())[instId] ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Contracts for a base-asset quantity, snapped down to the lot step. */
+  private szFromBase(info: any, baseQty: number): string {
+    const ctVal = Number(info?.ctVal);
+    const lotSz = Number(info?.lotSz);
+    if (!Number.isFinite(ctVal) || ctVal <= 0) {
+      // Unknown contract value: sending a raw base qty would be a silent
+      // mis-size, so refuse rather than guess.
+      throw new OkxApiError(
+        `OKX 缺少 ${info?.instId ?? "此合約"} 的合約面值 (ctVal)，無法換算張數`
+      );
+    }
+    let contracts = baseQty / ctVal;
+    if (Number.isFinite(lotSz) && lotSz > 0) contracts = floorToStep(contracts, lotSz);
+    const minSz = Number(info?.minSz);
+    if (Number.isFinite(minSz) && minSz > 0 && contracts < minSz) contracts = minSz;
+    const dec = (Number.isFinite(lotSz) ? decimalsOf(info.lotSz) : 0) ?? 0;
+    return contracts.toFixed(dec);
+  }
+
+  async pricePrecision(symbol: string): Promise<number | null> {
+    const info = await this.infoFor(symbol);
+    return info?.tickSz != null ? decimalsOf(info.tickSz) : null;
+  }
+
+  /** Limits converted from contracts back into BASE-ASSET units. */
+  async orderFilters(symbol: string): Promise<OrderFilters> {
+    const info = await this.infoFor(symbol);
+    if (!info) {
+      return {
+        baseDecimals: null, quoteDecimals: null,
+        minSizeLimit: null, minSizeMarket: null, minNotional: null,
+      };
+    }
+    const ctVal = Number(info.ctVal);
+    const lotSz = Number(info.lotSz);
+    const minSz = Number(info.minSz);
+    const baseStep =
+      Number.isFinite(ctVal) && Number.isFinite(lotSz) ? ctVal * lotSz : null;
+    const minBase =
+      Number.isFinite(ctVal) && Number.isFinite(minSz) ? ctVal * minSz : null;
+    return {
+      baseDecimals: baseStep != null ? decimalsOf(baseStep.toFixed(10).replace(/0+$/, "")) : null,
+      quoteDecimals: info.tickSz != null ? decimalsOf(info.tickSz) : null,
+      minSizeLimit: minBase,
+      minSizeMarket: minBase,
+      minNotional: null,
+    };
+  }
+
+  // --------------------------------------------------------- market data
+  async getPrice(instId: string): Promise<number> {
+    const rows = await this.request("GET", "/api/v5/market/ticker", { instId });
+    const px = parseFloat(rows[0]?.last);
+    if (!Number.isFinite(px)) throw new OkxApiError(`no ticker for ${instId}`);
+    return px;
+  }
+
+  /** High/low since `sinceMs`, from 1-minute candles.
+   *  OKX candle rows are arrays: [ts, o, h, l, c, ...]. */
+  async priceRange(
+    instId: string,
+    sinceMs: number
+  ): Promise<{ high: number; low: number } | null> {
+    let rows: any[];
+    try {
+      rows = await this.request("GET", "/api/v5/market/candles", {
+        instId, bar: "1m", limit: "60",
+      });
+    } catch {
+      return null;
+    }
+    let high = -Infinity;
+    let low = Infinity;
+    let n = 0;
+    for (const k of rows) {
+      const t = Number(k?.[0]);
+      if (Number.isFinite(t) && t + 60_000 < sinceMs) continue;
+      const h = parseFloat(k?.[2]);
+      const l = parseFloat(k?.[3]);
+      if (!Number.isFinite(h) || !Number.isFinite(l)) continue;
+      high = Math.max(high, h);
+      low = Math.min(low, l);
+      n++;
+    }
+    return n ? { high, low } : null;
+  }
+
+  // -------------------------------------------------------- account/trade
+  async getAvailableUsdt(): Promise<number> {
+    const rows = await this.request("GET", "/api/v5/account/balance", { ccy: "USDT" });
+    const details: any[] = rows[0]?.details ?? [];
+    const usdt = details.find((d) => d.ccy === "USDT");
+    const v = parseFloat(usdt?.availBal ?? usdt?.availEq ?? "0");
+    return Number.isFinite(v) ? v : 0;
+  }
+
+  async setLeverage(instId: string, leverage: number): Promise<void> {
+    await this.request("POST", "/api/v5/account/set-leverage", {}, {
+      instId, lever: String(leverage), mgnMode: this.tdMode,
+    });
+  }
+
+  async getOpenOrders(instId: string): Promise<any[]> {
+    const rows = await this.request("GET", "/api/v5/trade/orders-pending", {
+      instType: "SWAP", instId,
+    });
+    // normalize to the orderId field the executor looks for
+    return rows.map((o: any) => ({ ...o, orderId: o.ordId }));
+  }
+
+  async placeOrder(opts: PlaceOrderOpts): Promise<PlacedOrder> {
+    const info = await this.infoFor(opts.symbol);
+    if (!info) throw new OkxApiError(`OKX 找不到合約 ${opts.symbol}`);
+    const body: Record<string, unknown> = {
+      instId: opts.symbol,
+      tdMode: this.tdMode,
+      side: opts.side.toLowerCase(),          // buy | sell
+      ordType: opts.type.toLowerCase(),       // market | limit
+      // one-way (net) position mode: direction comes from side + reduceOnly
+      sz: this.szFromBase(info, Number(opts.size ?? 0)),
+    };
+    if (opts.type === "LIMIT" && opts.price !== undefined) body.px = opts.price;
+    if (opts.reduceOnly) body.reduceOnly = true;
+    if (opts.clientOrderId) body.clOrdId = opts.clientOrderId;
+
+    const rows = await this.request("POST", "/api/v5/trade/order", {}, body);
+    const first = rows[0] ?? {};
+    // a per-order failure can still arrive under a top-level code of "0"
+    if (first.sCode !== undefined && String(first.sCode) !== "0") {
+      throw new OkxApiError(`OKX API error (${first.sCode}): ${first.sMsg ?? ""}`, String(first.sCode), first);
+    }
+    return { orderId: first.ordId ? String(first.ordId) : null, raw: first };
+  }
+
+  async cancelOrder(instId: string, orderId: string): Promise<unknown> {
+    return this.request("POST", "/api/v5/trade/cancel-order", {}, {
+      instId, ordId: orderId,
+    });
+  }
+
+  async cancelAllOrders(instId: string): Promise<number> {
+    const orders = await this.getOpenOrders(instId).catch(() => []);
+    let n = 0;
+    for (const o of orders) {
+      const id = String(o.ordId ?? o.orderId ?? "");
+      if (!id) continue;
+      await this.cancelOrder(instId, id).catch(() => {});
+      n++;
+    }
+    return n;
+  }
+}
