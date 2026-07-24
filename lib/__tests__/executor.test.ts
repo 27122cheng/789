@@ -115,6 +115,34 @@ describe("dry-run pipeline", () => {
     expect((await getPositions())["BTCUSDT"]).toBeUndefined();
   });
 
+  it("到價進場: limit entry waits, then the monitor fills at market on touch", async () => {
+    const cfg = settings();
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.orders.entryType = "limit";
+    // current price 60500 (stubbed), entry 60000 below -> wait for price to fall
+    stubFetchPrice(60500);
+    await handleIncomingMessage(
+      "BNBUSDT LONG Entry: 60000 SL: 59000 TP1: 61000", meta(), cfg
+    );
+    let pos = (await getPositions())["BNBUSDT"];
+    expect(pos).toBeDefined();
+    expect(pos.pendingEntry).toBeTruthy();
+    expect(pos.qty).toBe(0);
+
+    // price still above entry -> stays pending
+    stubFetchPrice(60200);
+    await monitorTick(cfg);
+    expect((await getPositions())["BNBUSDT"].pendingEntry).toBeTruthy();
+
+    // price reaches entry -> fills at market
+    stubFetchPrice(60000);
+    await monitorTick(cfg);
+    pos = (await getPositions())["BNBUSDT"];
+    expect(pos.pendingEntry).toBeNull();
+    expect(pos.qty).toBeGreaterThan(0);
+    expect(pos.initialRisk).toBeGreaterThan(0);
+  });
+
   it("R-multiple scale-out closes the configured % at r×R profit", async () => {
     const cfg = settings();
     cfg.trading.risk.cooldownSeconds = 0;

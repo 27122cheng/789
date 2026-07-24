@@ -368,24 +368,15 @@ export async function executeSignal(
         });
         const refPrice = await fetchPriceSafe(client, sym, aligned.entry);
         const entryType = settings.trading.orders.entryType;
-        const limitPrice =
-          entryType === "limit" ? aligned.entry ?? refPrice : null;
-        const res = await placeEntry(
-          client, live, sym, signal.side, sizeUsdt,
-          limitPrice ? entryType : "market", limitPrice, refPrice
-        );
         const maxAdds = settings.trading.risk.maxAddsPerPosition;
         const slForRisk = settings.trading.orders.attachStopLoss ? aligned.stopLoss : null;
-        const initialRisk =
-          slForRisk != null ? Math.abs(res.price - slForRisk) : null;
         const rt = settings.trading.orders.rTakeProfit;
-        positions[sym] = {
+
+        // fields shared by an immediately-filled and a pending (到價進場) position
+        const common = {
           symbol: sym,
           side: signal.side,
           leverage,
-          entryPrice: res.price,
-          qty: res.qty,
-          originalQty: res.qty,
           sizeUsdt,
           stopLoss: slForRisk,
           takeProfits: settings.trading.orders.attachTakeProfit
@@ -396,17 +387,58 @@ export async function executeSignal(
           pendingAdds: signal.addLevels
             .slice(0, maxAdds)
             .map((level) => ({ level, armedAt: null, armed: false })),
-          entryOrderType: limitPrice ? entryType : "market",
+          entryOrderType: entryType,
           beMoved: false,
-          initialRisk,
-          rTargets:
-            rt?.enabled && initialRisk
-              ? rt.levels.map((l) => ({ r: l.r, closePercent: l.closePercent, done: false }))
-              : [],
-          orderIds: res.orderIds,
           openedAt: Date.now(),
           addCount: 0,
           dryRun: !live,
+        };
+        const mkR = (risk: number | null) =>
+          rt?.enabled && risk
+            ? rt.levels.map((l) => ({ r: l.r, closePercent: l.closePercent, done: false }))
+            : [];
+
+        // 到價進場: entryType "limit" + a target entry that the market hasn't
+        // reached yet -> wait; the monitor market-enters when price arrives.
+        if (entryType === "limit" && aligned.entry != null && refPrice != null) {
+          const dir: "up" | "down" = refPrice >= aligned.entry ? "down" : "up";
+          const reached = dir === "down" ? refPrice <= aligned.entry : refPrice >= aligned.entry;
+          if (!reached) {
+            const risk = slForRisk != null ? Math.abs(aligned.entry - slForRisk) : null;
+            positions[sym] = {
+              ...common,
+              entryPrice: aligned.entry, // planned entry
+              qty: 0,
+              originalQty: 0,
+              initialRisk: risk,
+              rTargets: mkR(risk),
+              orderIds: [],
+              pendingEntry: { target: aligned.entry, dir },
+            };
+            await savePositions(positions);
+            await setCooldown(sym, Date.now());
+            await record("open",
+              { symbol: sym, side: signal.side, sizeUsdt, qty: 0, price: aligned.entry, leverage },
+              live, true, `掛單等待到價進場 @ ${aligned.entry}（現價 ${refPrice}）`);
+            return;
+          }
+        }
+
+        // otherwise fill now at market
+        const res = await placeEntry(
+          client, live, sym, signal.side, sizeUsdt, "market", null, refPrice ?? aligned.entry
+        );
+        const initialRisk =
+          slForRisk != null ? Math.abs(res.price - slForRisk) : null;
+        positions[sym] = {
+          ...common,
+          entryPrice: res.price,
+          qty: res.qty,
+          originalQty: res.qty,
+          initialRisk,
+          rTargets: mkR(initialRisk),
+          orderIds: res.orderIds,
+          pendingEntry: null,
         };
         await savePositions(positions);
         await setCooldown(sym, Date.now());
@@ -534,12 +566,45 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
   const actions: string[] = [];
   let changed = false;
 
+  const pendingTimeoutMs = 6 * 60 * 60 * 1000; // drop unfilled 到價進場 after 6h
+
   for (const sym of Object.keys(positions)) {
     const pos = positions[sym];
     const price = await fetchPriceSafe(client, sym, null);
     if (price == null) {
       actions.push(`${sym}: price unavailable, skipped`);
       continue;
+    }
+
+    // 到價進場: fill at market once Pionex's price reaches the target
+    if (pos.pendingEntry) {
+      const { target, dir } = pos.pendingEntry;
+      if (Date.now() - pos.openedAt > pendingTimeoutMs) {
+        delete positions[sym];
+        changed = true;
+        actions.push(`${sym}: 待進場逾時未到價，取消`);
+        continue;
+      }
+      const reached = dir === "down" ? price <= target : price >= target;
+      if (!reached) continue; // keep waiting
+      try {
+        const res = await placeEntry(
+          client, live && !pos.dryRun, sym, pos.side, pos.sizeUsdt, "market", null, price
+        );
+        pos.entryPrice = res.price;
+        pos.qty = res.qty;
+        pos.originalQty = res.qty;
+        pos.initialRisk = pos.stopLoss != null ? Math.abs(res.price - pos.stopLoss) : null;
+        pos.pendingEntry = null;
+        changed = true;
+        actions.push(`${sym}: 到價進場 @ ${target}（現價 ${price}）`);
+        await record("open",
+          { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: res.qty, price: res.price, leverage: pos.leverage },
+          live && !pos.dryRun, true, `到價進場 @ ${target}（現價 ${price}）`, res.orderIds);
+      } catch (err) {
+        actions.push(`${sym}: 到價進場失敗: ${(err as Error).message}`);
+      }
+      continue; // just entered (or failed) - don't run SL/TP this tick
     }
     const dir = pos.side === "long" ? 1 : -1;
 

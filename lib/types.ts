@@ -52,6 +52,9 @@ export interface Position {
   beMoved: boolean;            // SL already moved to breakeven after TP1
   initialRisk: number | null;  // |entry - stopLoss| at open, for R-multiples
   rTargets: { r: number; closePercent: number; done: boolean }[];
+  // 到價進場: while set, the position hasn't been filled yet - the monitor
+  // enters at market once Pionex's price reaches `target` from `dir`.
+  pendingEntry: { target: number; dir: "up" | "down" } | null;
   orderIds: string[];          // pending entry order ids (limit entries)
   openedAt: number;
   addCount: number;

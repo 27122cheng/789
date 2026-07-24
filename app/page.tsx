@@ -154,7 +154,11 @@ export default function Dashboard() {
                         : "-"}
                     </td>
                     <td>{p.addCount}</td>
-                    <td>{p.dryRun ? "模擬" : "真實"}</td>
+                    <td>
+                      {p.pendingEntry ? "⏳ 待進場" : ""}
+                      {p.pendingEntry ? " " : ""}
+                      {p.dryRun ? "模擬" : "真實"}
+                    </td>
                   </tr>
                 ))}
               </tbody>
