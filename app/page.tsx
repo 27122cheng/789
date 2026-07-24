@@ -37,6 +37,16 @@ export default function Dashboard() {
     }
   }, []);
 
+  async function clearPositions() {
+    if (!confirm("確定清空所有持倉？這只會清掉系統的追蹤紀錄，不會平掉 Pionex 上的真實倉位。")) return;
+    const { status, body } = await apiFetch("/api/positions/clear", { method: "POST" });
+    if (status === 200) {
+      await load();
+    } else {
+      alert(body?.error ?? `清空失敗 (HTTP ${status})`);
+    }
+  }
+
   useEffect(() => {
     if (getStoredPassword()) load();
   }, [load]);
@@ -138,6 +148,19 @@ export default function Dashboard() {
               </tbody>
             </table>
           </div>
+        )}
+        {positions.length > 0 && (
+          <button
+            onClick={clearPositions}
+            style={{ background: "var(--red)", color: "#fff", marginTop: 14 }}
+          >
+            🗑 一鍵清空所有持倉
+          </button>
+        )}
+        {positions.length > 0 && (
+          <p className="hint" style={{ marginTop: 8 }}>
+            只清掉系統的追蹤紀錄（適合清理累積的模擬倉）；不會平掉 Pionex 上的真實倉位。
+          </p>
         )}
       </div>
 
