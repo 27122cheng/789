@@ -344,13 +344,12 @@ export async function executeSignal(
     return;
   }
 
+  // Risk-control rejections (duplicate position, max open positions, cooldown,
+  // stale signal, whitelist ...) are expected and only cause confusion in the
+  // log, so they are dropped silently with no record. Genuine execution
+  // failures (Pionex API errors) below ARE still recorded.
   const reject = riskReject(settings, signal, positions, cooldowns);
   if (reject) {
-    await record(
-      signal.action,
-      { symbol: sym, side: signal.side, sizeUsdt: 0, qty: 0, price: null, leverage: 0 },
-      live, false, `rejected: ${reject}`
-    );
     return;
   }
 
@@ -358,8 +357,7 @@ export async function executeSignal(
     switch (signal.action) {
       case "open": {
         if (!signal.side) {
-          await record(signal.action, { symbol: sym, side: null, sizeUsdt: 0, qty: 0, price: null, leverage: 0 }, live, false, "rejected: no long/short side in signal");
-          return;
+          return; // incomplete signal (no direction) - drop silently
         }
         const leverage = computeLeverage(settings, signal);
         const sizeUsdt = await computeSizeUsdt(settings, signal, client, live, false);
