@@ -39,6 +39,7 @@ export default function SettingsPage() {
   const [cooldown, setCooldown] = useState(30);
   const [maxAge, setMaxAge] = useState(120);
   const [entryType, setEntryType] = useState("market");
+  const [belowMinSize, setBelowMinSize] = useState("lift");
   const [attachSl, setAttachSl] = useState(true);
   const [attachTp, setAttachTp] = useState(true);
   const [splitTp, setSplitTp] = useState(true);
@@ -90,6 +91,7 @@ export default function SettingsPage() {
     setCooldown(s.trading.risk.cooldownSeconds);
     setMaxAge(s.trading.risk.maxSignalAgeSeconds);
     setEntryType(s.trading.orders.entryType);
+    setBelowMinSize(s.trading.orders.belowMinSize ?? "lift");
     setAttachSl(!!s.trading.orders.attachStopLoss);
     setAttachTp(!!s.trading.orders.attachTakeProfit);
     setSplitTp(s.trading.orders.splitTakeProfit !== false);
@@ -151,6 +153,7 @@ export default function SettingsPage() {
           },
           orders: {
             entryType,
+            belowMinSize,
             attachStopLoss: attachSl,
             attachTakeProfit: attachTp,
             splitTakeProfit: splitTp,
@@ -364,6 +367,17 @@ export default function SettingsPage() {
               <option value="market">市價 (market)</option>
               <option value="limit">限價 (limit，用信號的入場價)</option>
             </select>
+            <label style={{ marginTop: 12 }}>金額低於交易所最低下單量時</label>
+            <select value={belowMinSize} onChange={(e) => setBelowMinSize(e.target.value)}>
+              <option value="lift">自動提高到最低量（一定會進場）</option>
+              <option value="skip">跳過這筆訊號（絕不超過設定金額）</option>
+            </select>
+            <p className="hint">
+              交易所對每個合約有最低下單量，例如 OKX 的 BTC-USDT-SWAP 最小 0.01 張
+              （0.0001 BTC，約 6~7 USDT）。若你設的固定金額比它小，
+              「自動提高」會用最低量下單（實際風險大於設定值，紀錄會標明）；
+              「跳過」則不交易，高價幣的訊號會被略過。
+            </p>
           </div>
           <div style={{ display: "flex", alignItems: "flex-end", gap: 16 }}>
             <div className="checkbox">

@@ -165,6 +165,12 @@ export interface Settings {
       requireEntryAndSl: boolean;
     };
     orders: {
+      // What to do when the configured position size is below the venue's
+      // minimum order size (e.g. 3 USDT on BTC-USDT-SWAP, whose smallest
+      // order is 0.01 contracts ≈ 6.4 USDT):
+      //   "lift" - raise the order to the minimum (trades, but risks more)
+      //   "skip" - drop the signal (never exceeds the configured size)
+      belowMinSize: "lift" | "skip";
       entryType: "market" | "limit";
       attachStopLoss: boolean;
       attachTakeProfit: boolean;
@@ -237,6 +243,7 @@ export const DEFAULT_SETTINGS: Settings = {
       requireEntryAndSl: true,
     },
     orders: {
+      belowMinSize: "lift",
       entryType: "market",
       attachStopLoss: true,
       attachTakeProfit: true,

@@ -581,3 +581,55 @@ describe("加密掃描 Pro pipeline behaviours", () => {
     expect((await getPositions())["ACHUSDT"]).toBeUndefined();
   });
 });
+
+describe("minimum order size policy", () => {
+  function okxCfg() {
+    const cfg = settings();
+    cfg.exchange = "okx";
+    cfg.okx = {
+      apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false,
+    };
+    cfg.trading.liveTrading = true;
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.orders.entryType = "market";
+    // 3 USDT at 60000 = 0.00005 BTC, below the 0.0001 BTC minimum
+    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 3, percentBalance: 5 };
+    return cfg;
+  }
+  function stub(orders: any[]) {
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any[] = [];
+      if (url.includes("/account/config")) data = [{ posMode: "net_mode" }];
+      else if (url.includes("/public/instruments")) {
+        data = [{ instId: "BTC-USDT-SWAP", ctVal: "0.01", lotSz: "0.01", minSz: "0.01", tickSz: "0.1" }];
+      } else if (url.includes("/market/ticker")) data = [{ last: "60000" }];
+      else if (url.includes("/trade/order")) { orders.push(body); data = [{ ordId: "M-1", sCode: "0" }]; }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+  }
+
+  it("lift: trades at the minimum and says so in the record", async () => {
+    const cfg = okxCfg();
+    cfg.trading.orders.belowMinSize = "lift";
+    const orders: any[] = [];
+    stub(orders);
+    await handleIncomingMessage("BTCUSDT LONG Entry: 60000 SL: 59000", meta(), cfg);
+    expect(orders).toHaveLength(1);
+    expect((await getPositions())["BTCUSDT"]).toBeDefined();
+    const rec = (await getOrders()).find((o) => o.symbol === "BTCUSDT" && o.success);
+    expect(rec!.message).toContain("最低下單量");
+    expect(rec!.message).toContain("6.00");  // 0.0001 BTC * 60000
+  });
+
+  it("skip: places nothing and opens no position", async () => {
+    const cfg = okxCfg();
+    cfg.trading.orders.belowMinSize = "skip";
+    const orders: any[] = [];
+    stub(orders);
+    await handleIncomingMessage("ETHUSDT LONG Entry: 60000 SL: 59000", meta(), cfg);
+    expect(orders).toHaveLength(0);
+    expect((await getPositions())["ETHUSDT"]).toBeUndefined();
+  });
+});

@@ -26,6 +26,10 @@ import {
 } from "./store";
 import { OrderRecord, ParsedSignal, Position, Settings } from "./types";
 
+/** Raised when the venue's minimum order size exceeds the configured position
+ *  size and the user chose to skip rather than trade bigger than intended. */
+class BelowMinSizeError extends Error {}
+
 function makeClient(settings: Settings): ExchangeClient {
   if (settings.exchange === "okx") {
     return new OkxClient(
@@ -254,7 +258,8 @@ async function placeEntry(
   entryType: "market" | "limit",
   limitPrice: number | null,
   refPrice: number | null,
-  leverage?: number
+  leverage?: number,
+  belowMinSize: "lift" | "skip" = "lift"
 ): Promise<{ qty: number; price: number; orderIds: string[]; note: string }> {
   const perp = client.perpSymbol(symbol);
   const price = limitPrice ?? refPrice;
@@ -289,6 +294,12 @@ async function placeEntry(
   // put more at risk than the user asked for, so the record says so.
   let liftedNote = "";
   if (minSize && qty < minSize) {
+    if (belowMinSize === "skip") {
+      throw new BelowMinSizeError(
+        `${symbol} 需要至少 ${minSize}（約 ${(minSize * price).toFixed(2)} USDT），` +
+        `高於設定的 ${sizeUsdt} USDT，依設定跳過這筆`
+      );
+    }
     qty = minSize;
     liftedNote =
       ` ⚠️ 低於交易所最低下單量，已提高到 ${minSize}` +
@@ -495,7 +506,8 @@ export async function executeSignal(
             if (live) {
               try {
                 const r = await placeEntry(
-                  client, true, sym, signal.side, sizeUsdt, "limit", aligned.entry, refPrice, leverage
+                  client, true, sym, signal.side, sizeUsdt, "limit", aligned.entry, refPrice, leverage,
+                  settings.trading.orders.belowMinSize ?? "lift"
                 );
                 mode = "limit_order";
                 orderId = r.orderIds[0] ?? null;
@@ -539,7 +551,8 @@ export async function executeSignal(
 
         // otherwise fill now at market
         const res = await placeEntry(
-          client, live, sym, signal.side, sizeUsdt, "market", null, refPrice ?? aligned.entry, leverage
+          client, live, sym, signal.side, sizeUsdt, "market", null, refPrice ?? aligned.entry, leverage,
+          settings.trading.orders.belowMinSize ?? "lift"
         );
         const initialRisk =
           slForRisk != null ? Math.abs(res.price - slForRisk) : null;
@@ -566,7 +579,8 @@ export async function executeSignal(
         const sizeUsdt = await computeSizeUsdt(settings, signal, client, live, true);
         const refPrice = await fetchPriceSafe(client, sym, signal.entryPrice ?? p.entryPrice);
         const res = await placeEntry(
-          client, live && !p.dryRun, sym, p.side, sizeUsdt, "market", null, refPrice, p.leverage
+          client, live && !p.dryRun, sym, p.side, sizeUsdt, "market", null, refPrice, p.leverage,
+          settings.trading.orders.belowMinSize ?? "lift"
         );
         const newQty = p.qty + res.qty;
         p.entryPrice = (p.entryPrice * p.qty + res.price * res.qty) / newQty;
@@ -657,6 +671,11 @@ export async function executeSignal(
       }
     }
   } catch (err) {
+    if (err instanceof BelowMinSizeError) {
+      // a deliberate no-trade, not a failure - keep it out of the action log
+      // for the same reason risk rejections are dropped there
+      return;
+    }
     // PionexApiError.message already carries the "Pionex API error ..." prefix
     let msg = err instanceof PionexApiError
       ? err.message
