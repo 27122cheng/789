@@ -37,6 +37,7 @@ const FUTURES = {
   balances: "/uapi/v1/account/balances",
   symbols: "/uapi/v1/common/symbols",
   tickers: "/uapi/v1/market/tickers",
+  klines: "/uapi/v1/market/klines",
 };
 
 // Legacy spot-prefixed endpoints, used ONLY as a read fallback for market data
@@ -45,6 +46,7 @@ const LEGACY = {
   balances: "/api/v1/account/balances",
   symbols: "/api/v1/common/symbols",
   tickers: "/api/v1/market/tickers",
+  klines: "/api/v1/market/klines",
 };
 
 export function signRequest(
@@ -293,6 +295,54 @@ export class PionexClient {
     } catch {
       return parse(await this.signed("GET", LEGACY.tickers, { symbol }, undefined, true));
     }
+  }
+
+  /**
+   * Highest/lowest traded price since `sinceMs`, from 1-minute candles.
+   *
+   * The monitor only samples the last price once a minute, so a wick that
+   * touches an entry level and snaps back between two polls is invisible to a
+   * point-in-time check. Reading the candle high/low over the elapsed window
+   * makes a touch detectable no matter when in the minute it happened.
+   * Returns null if candles are unavailable (caller falls back to last price).
+   */
+  async priceRange(
+    symbol: string,
+    sinceMs: number
+  ): Promise<{ high: number; low: number } | null> {
+    const parse = (payload: Record<string, any>): { high: number; low: number } | null => {
+      const rows: any[] = payload?.data?.klines ?? payload?.data ?? [];
+      let high = -Infinity;
+      let low = Infinity;
+      let n = 0;
+      for (const k of rows) {
+        const t = Number(k?.time ?? k?.timestamp ?? (Array.isArray(k) ? k[0] : NaN));
+        // ignore candles that closed before the order existed
+        if (Number.isFinite(t) && t + 60_000 < sinceMs) continue;
+        const h = parseFloat(k?.high ?? (Array.isArray(k) ? k[2] : NaN));
+        const l = parseFloat(k?.low ?? (Array.isArray(k) ? k[3] : NaN));
+        if (!Number.isFinite(h) || !Number.isFinite(l)) continue;
+        high = Math.max(high, h);
+        low = Math.min(low, l);
+        n++;
+      }
+      return n ? { high, low } : null;
+    };
+    // Pionex names the 1-minute interval "1M"; tolerate "1m" on older routes.
+    for (const interval of ["1M", "1m"]) {
+      const params = { symbol, interval, limit: "30" };
+      try {
+        return parse(await this.signed("GET", FUTURES.klines, params));
+      } catch {
+        /* try the legacy route below */
+      }
+      try {
+        return parse(await this.signed("GET", LEGACY.klines, params, undefined, true));
+      } catch {
+        /* try the next interval spelling */
+      }
+    }
+    return null;
   }
 
   async getOpenOrders(symbol: string): Promise<any[]> {

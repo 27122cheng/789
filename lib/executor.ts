@@ -398,13 +398,35 @@ export async function executeSignal(
             ? rt.levels.map((l) => ({ r: l.r, closePercent: l.closePercent, done: false }))
             : [];
 
-        // 到價進場: entryType "limit" + a target entry that the market hasn't
-        // reached yet -> wait; the monitor market-enters when price arrives.
+        // entryType "limit" + a target the market hasn't reached yet: rest a
+        // REAL limit order on Pionex at the signal's entry price so it fills at
+        // exactly that price. If Pionex rejects it (price band / filters), fall
+        // back to 到價進場 - the monitor market-enters when price arrives.
         if (entryType === "limit" && aligned.entry != null && refPrice != null) {
           const dir: "up" | "down" = refPrice >= aligned.entry ? "down" : "up";
           const reached = dir === "down" ? refPrice <= aligned.entry : refPrice >= aligned.entry;
           if (!reached) {
             const risk = slForRisk != null ? Math.abs(aligned.entry - slForRisk) : null;
+            let mode: "limit_order" | "watch" = "watch";
+            let orderId: string | null = null;
+            let pendQty = sizeUsdt / aligned.entry;
+            let note = `掛單等待到價進場 @ ${aligned.entry}（現價 ${refPrice}）`;
+            if (live) {
+              try {
+                const r = await placeEntry(
+                  client, true, sym, signal.side, sizeUsdt, "limit", aligned.entry, refPrice
+                );
+                mode = "limit_order";
+                orderId = r.orderIds[0] ?? null;
+                pendQty = r.qty;
+                note = `已在 Pionex 掛限價單 @ ${aligned.entry}（現價 ${refPrice}）`;
+              } catch (err) {
+                // keep the trade alive: watch the price ourselves instead
+                note =
+                  `Pionex 掛限價單被拒（${(err as Error).message}）` +
+                  `→ 改用到價自動進場 @ ${aligned.entry}（現價 ${refPrice}）`;
+              }
+            }
             positions[sym] = {
               ...common,
               entryPrice: aligned.entry, // planned entry
@@ -412,14 +434,14 @@ export async function executeSignal(
               originalQty: 0,
               initialRisk: risk,
               rTargets: mkR(risk),
-              orderIds: [],
-              pendingEntry: { target: aligned.entry, dir },
+              orderIds: orderId ? [orderId] : [],
+              pendingEntry: { target: aligned.entry, dir, mode, orderId, qty: pendQty },
             };
             await savePositions(positions);
             await setCooldown(sym, Date.now());
             await record("open",
               { symbol: sym, side: signal.side, sizeUsdt, qty: 0, price: aligned.entry, leverage },
-              live, true, `掛單等待到價進場 @ ${aligned.entry}（現價 ${refPrice}）`);
+              live, true, note, orderId ? [orderId] : []);
             return;
           }
         }
@@ -490,8 +512,10 @@ export async function executeSignal(
         // records, and record nothing new.
         if (live) await client.cancelAllOrders(client.perpSymbol(sym));
         if (pos) {
-          if (pos.entryOrderType !== "limit") {
-            // market entry already filled -> cancelling the idea means exiting
+          // Anything actually filled must be exited - including a limit entry
+          // that already got filled (qty > 0); only an unfilled pending order
+          // can just be dropped after cancelling it above.
+          if (pos.qty > 0) {
             await closeQty(client, live, pos, pos.qty);
           }
           delete positions[sym];
@@ -576,16 +600,61 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
       continue;
     }
 
-    // 到價進場: fill at market once Pionex's price reaches the target
+    // Not filled yet: either a real limit order rests on Pionex, or we watch
+    // the price ourselves and market-enter on touch (到價進場).
     if (pos.pendingEntry) {
       const { target, dir } = pos.pendingEntry;
+      const mode = pos.pendingEntry.mode ?? "watch"; // legacy positions: watch
       if (Date.now() - pos.openedAt > pendingTimeoutMs) {
+        if (live && !pos.dryRun && mode === "limit_order") {
+          await client.cancelAllOrders(client.perpSymbol(sym)).catch(() => {});
+        }
         delete positions[sym];
         changed = true;
         actions.push(`${sym}: 待進場逾時未到價，取消`);
         continue;
       }
-      const reached = dir === "down" ? price <= target : price >= target;
+
+      // A real resting order fills on the exchange; detect it by the order
+      // leaving the open-orders book.
+      if (mode === "limit_order") {
+        const open = await client
+          .getOpenOrders(client.perpSymbol(sym))
+          .catch(() => null);
+        if (open == null) continue; // can't tell right now - check again later
+        const oid = pos.pendingEntry.orderId;
+        const stillResting = open.some(
+          (o: any) => String(o.orderId ?? o.id ?? "") === String(oid)
+        );
+        if (stillResting) continue; // still waiting at the entry price
+        pos.entryPrice = target;
+        pos.qty = pos.pendingEntry.qty;
+        pos.originalQty = pos.pendingEntry.qty;
+        pos.initialRisk = pos.stopLoss != null ? Math.abs(target - pos.stopLoss) : null;
+        pos.pendingEntry = null;
+        changed = true;
+        actions.push(`${sym}: 限價單已成交 @ ${target}`);
+        await record("open",
+          { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: pos.qty, price: target, leverage: pos.leverage },
+          live && !pos.dryRun, true, `限價單成交 @ ${target}`, oid ? [String(oid)] : []);
+        continue;
+      }
+
+      // watch mode: the last price is only a once-a-minute sample, so also
+      // check the candle high/low since the order was placed - otherwise a
+      // wick that touches the entry between polls is missed entirely.
+      let reached = dir === "down" ? price <= target : price >= target;
+      if (!reached && live && !pos.dryRun) {
+        const range = await client
+          .priceRange(client.perpSymbol(sym), pos.openedAt)
+          .catch(() => null);
+        if (range) {
+          reached = dir === "down" ? range.low <= target : range.high >= target;
+          if (reached) {
+            actions.push(`${sym}: 期間曾觸及 ${target}（區間 ${range.low}~${range.high}）`);
+          }
+        }
+      }
       if (!reached) continue; // keep waiting
       try {
         const res = await placeEntry(

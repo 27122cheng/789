@@ -143,6 +143,106 @@ describe("dry-run pipeline", () => {
     expect(pos.initialRisk).toBeGreaterThan(0);
   });
 
+  it("live limit entry rests a real order on Pionex, then fills when it leaves the book", async () => {
+    const cfg = settings();
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.orders.entryType = "limit";
+    cfg.trading.liveTrading = true;
+    cfg.pionex.apiKey = "k";
+    cfg.pionex.apiSecret = "s";
+
+    let price = 60500;
+    let openOrders: any[] = [];
+    const placed: any[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any = {};
+      if (url.includes("/common/symbols")) {
+        data = { symbols: [{ symbol: "XRP_USDT_PERP", baseStep: "0.001", quoteStep: "0.0001", minSizeLimit: "1" }] };
+      } else if (url.includes("/market/tickers")) {
+        data = { tickers: [{ close: String(price) }] };
+      } else if (url.includes("/trade/openOrders")) {
+        data = { orders: openOrders };
+      } else if (url.includes("/trade/order")) {
+        placed.push(body);
+        data = { orderId: "OID-1" };
+      }
+      return { ok: true, status: 200, json: async () => ({ result: true, data }) };
+    }));
+
+    await handleIncomingMessage(
+      "XRPUSDT LONG Entry: 60000 SL: 59000 TP1: 61000", meta(), cfg
+    );
+
+    // a genuine LIMIT order was sent to Pionex at the signal's entry price
+    expect(placed).toHaveLength(1);
+    expect(placed[0].type).toBe("LIMIT");
+    expect(placed[0].price).toBe("60000.0000");
+    expect(placed[0].positionSide).toBe("BOTH");
+    let pos = (await getPositions())["XRPUSDT"];
+    expect(pos.pendingEntry.mode).toBe("limit_order");
+    expect(pos.pendingEntry.orderId).toBe("OID-1");
+    expect(pos.qty).toBe(0);
+
+    // while the order is still resting, nothing changes
+    openOrders = [{ orderId: "OID-1" }];
+    await monitorTick(cfg);
+    expect((await getPositions())["XRPUSDT"].pendingEntry).toBeTruthy();
+
+    // order leaves the book -> treated as filled at exactly the entry price
+    openOrders = [];
+    await monitorTick(cfg);
+    pos = (await getPositions())["XRPUSDT"];
+    expect(pos.pendingEntry).toBeNull();
+    expect(pos.entryPrice).toBe(60000);
+    expect(pos.qty).toBeGreaterThan(0);
+  });
+
+  it("watch mode enters on a wick that touched the level between polls", async () => {
+    const cfg = settings();
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.orders.entryType = "limit";
+    cfg.trading.liveTrading = true;
+    cfg.pionex.apiKey = "k";
+    cfg.pionex.apiSecret = "s";
+
+    let price = 60500;
+    let low = 60400;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any = {};
+      let result = true;
+      if (url.includes("/common/symbols")) {
+        data = { symbols: [{ symbol: "ADA_USDT_PERP", baseStep: "0.001", quoteStep: "0.0001" }] };
+      } else if (url.includes("/market/tickers")) {
+        data = { tickers: [{ close: String(price) }] };
+      } else if (url.includes("/market/klines")) {
+        data = { klines: [{ time: Date.now(), high: price, low }] };
+      } else if (url.includes("/trade/order")) {
+        // Pionex's price filter refuses the resting LIMIT order (the real
+        // TRADE_PRICE_FILTER_DENIED case) -> falls back to watch mode;
+        // MARKET orders still go through.
+        if (body?.type === "LIMIT") result = false;
+        else data = { orderId: "OID-M" };
+      }
+      return { ok: result, status: result ? 200 : 400, json: async () => ({ result, code: "TRADE_PRICE_FILTER_DENIED", data }) };
+    }));
+
+    await handleIncomingMessage(
+      "ADAUSDT LONG Entry: 60000 SL: 59000 TP1: 61000", meta(), cfg
+    );
+    let pos = (await getPositions())["ADAUSDT"];
+    expect(pos.pendingEntry.mode).toBe("watch");
+
+    // last price never reaches 60000, but the candle low wicked through it
+    price = 60300;
+    low = 59900;
+    await monitorTick(cfg);
+    pos = (await getPositions())["ADAUSDT"];
+    expect(pos.pendingEntry).toBeNull();
+    expect(pos.qty).toBeGreaterThan(0);
+  });
+
   it("R-multiple scale-out closes the configured % at r×R profit", async () => {
     const cfg = settings();
     cfg.trading.risk.cooldownSeconds = 0;
