@@ -441,8 +441,7 @@ export async function executeSignal(
 
       case "close": {
         if (!pos) {
-          await record("close", { symbol: sym, side: null, sizeUsdt: 0, qty: 0, price: null, leverage: 0 }, live, false, `no tracked position for ${sym}`);
-          return;
+          return; // close signal for a symbol we don't hold - ignore silently
         }
         const ids = await closeQty(client, live, pos, pos.qty);
         delete positions[sym];
@@ -473,8 +472,7 @@ export async function executeSignal(
 
       case "update_sl": {
         if (!pos) {
-          await record("update_sl", { symbol: sym, side: null, sizeUsdt: 0, qty: 0, price: null, leverage: 0 }, live, false, `no tracked position for ${sym}`);
-          return;
+          return; // SL update for a symbol we don't hold - ignore silently
         }
         const rawSl = signal.stopLossBreakeven ? pos.entryPrice : signal.stopLoss;
         if (rawSl == null) {
@@ -494,8 +492,7 @@ export async function executeSignal(
 
       case "update_tp": {
         if (!pos) {
-          await record("update_tp", { symbol: sym, side: null, sizeUsdt: 0, qty: 0, price: null, leverage: 0 }, live, false, `no tracked position for ${sym}`);
-          return;
+          return; // TP update for a symbol we don't hold - ignore silently
         }
         if (!signal.takeProfits.length) {
           await record("update_tp", { symbol: sym, side: pos.side, sizeUsdt: 0, qty: 0, price: null, leverage: pos.leverage }, live, false, "no take-profit values found in message");

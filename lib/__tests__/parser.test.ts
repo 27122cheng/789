@@ -122,11 +122,16 @@ describe("filtering", () => {
 });
 
 describe("dedup", () => {
-  it("same message id but edited text gets a new key", () => {
+  it("same message id dedups regardless of edited text (no duplicate trades)", () => {
     const a = parseSignal("BTCUSDT long sl 59000", meta)!;
-    const b = parseSignal("BTCUSDT long sl 58000", meta)!;
+    const edited = parseSignal("BTCUSDT long sl 59000  👁 5", meta)!;
+    // same chat+message id -> same key even if the text was edited
+    expect(dedupKey(a)).toBe(dedupKey(edited));
+  });
+
+  it("different message ids get different keys", () => {
+    const a = parseSignal("BTCUSDT long sl 59000", { ...meta, messageId: 1 })!;
+    const b = parseSignal("BTCUSDT long sl 59000", { ...meta, messageId: 2 })!;
     expect(dedupKey(a)).not.toBe(dedupKey(b));
-    const a2 = parseSignal("BTCUSDT long sl 59000", meta)!;
-    expect(dedupKey(a)).toBe(dedupKey(a2));
   });
 });

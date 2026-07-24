@@ -252,6 +252,11 @@ async def forward_message(text: str, chat_id, message_id, ts_ms):
 
 
 async def start_watching(client: TelegramClient):
+    # guard against attaching handlers twice (would forward each message
+    # multiple times -> duplicate trades)
+    if state.get("watching"):
+        return
+    state["watching"] = True
     # resolve explicit watch targets, if any
     chats = None
     if WATCH_CHATS:

@@ -335,10 +335,8 @@ export function parseSignal(
 }
 
 export function dedupKey(signal: ParsedSignal): string {
-  // include a content digest so edited messages count as new signals
-  let hash = 0;
-  for (let i = 0; i < signal.rawText.length; i++) {
-    hash = (hash * 31 + signal.rawText.charCodeAt(i)) | 0;
-  }
-  return `${signal.chatId}:${signal.messageId}:${hash >>> 0}`;
+  // Dedup by chat + message id ONLY (no content hash): a message that gets
+  // edited (view counts, links, status) or re-delivered on reconnect/catch-up
+  // must NOT be treated as a new signal, or one signal becomes several trades.
+  return `${signal.chatId}:${signal.messageId}`;
 }
