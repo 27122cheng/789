@@ -340,6 +340,7 @@ describe("dry-run pipeline", () => {
     cfg.trading.orders.rTakeProfit = {
       enabled: true,
       levels: [{ r: 1, closePercent: 50 }, { r: 2, closePercent: 50 }],
+      applyWhen: "always",
     };
     // entry 60000, SL 59000 -> R = 1000
     await handleIncomingMessage("BTCUSDT LONG Entry: 60000 SL: 59000", meta(), cfg);
@@ -1597,8 +1598,10 @@ describe("an add's attached target must be beyond the tranche's entry", () => {
     await handleIncomingMessage(
       "TONUSDT LONG Entry: 95100 SL: 94150 TP1: 96000 TP2: 98000", meta(), cfg
     );
+    // the attachment covers the whole order, so it takes the FURTHEST target -
+    // attaching 止盈一 would close everything there and defeat 分批止盈
     const main = orders.find((o) => o.ordType === "market");
-    expect(main.attachAlgoOrds[1].tpTriggerPx).toBe("96000");   // main entry: TP1
+    expect(main.attachAlgoOrds[1].tpTriggerPx).toBe("98000");
 
     await handleIncomingMessage(
       `📌 加倉確認 #1｜請掛單 — TON ▲ 做多
@@ -1651,5 +1654,62 @@ describe("a cancelled order is not a fill", () => {
     expect((await getPositions())["RNDRUSDT"]).toBeUndefined();
     const rec = (await getOrders()).find((o) => o.message.includes("未成交就消失"));
     expect(rec).toBeDefined();
+  });
+});
+
+describe("how a position gets split", () => {
+  it("短線單 (two targets): splits across the targets, no R levels", async () => {
+    const cfg = settings();
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.risk.maxOpenPositions = 50;
+    // R is enabled but scoped to single-target trades
+    cfg.trading.orders.rTakeProfit = {
+      enabled: true, levels: [{ r: 1, closePercent: 50 }], applyWhen: "single_target",
+    };
+    await handleIncomingMessage(
+      "MASKUSDT LONG Entry: 100 SL: 95 TP1: 110 TP2: 120", meta(), cfg
+    );
+    const pos = (await getPositions())["MASKUSDT"];
+    expect(pos.takeProfits).toEqual([110, 120]);
+    expect(pos.rTargets).toEqual([]);        // targets do the splitting here
+    const q0 = pos.originalQty;
+
+    stubFetchPrice(110);
+    await monitorTick(cfg);
+    // first target closes half, position survives for the second
+    const half = (await getPositions())["MASKUSDT"];
+    expect(half.qty).toBeCloseTo(q0 / 2, 6);
+    stubFetchPrice(120);
+    await monitorTick(cfg);
+    expect((await getPositions())["MASKUSDT"]).toBeUndefined();
+  });
+
+  it("長線單 (one final target): splits by R, remainder at the target", async () => {
+    const cfg = settings();
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.risk.maxOpenPositions = 50;
+    cfg.trading.orders.rTakeProfit = {
+      enabled: true, levels: [{ r: 1, closePercent: 50 }], applyWhen: "single_target",
+    };
+    // one 最終止盈 only
+    await handleIncomingMessage(
+      "ENSUSDT LONG Entry: 100 SL: 95 最終止盈: 130", meta(), cfg
+    );
+    const pos = (await getPositions())["ENSUSDT"];
+    expect(pos.takeProfits).toEqual([130]);
+    expect(pos.rTargets).toHaveLength(1);    // R does the splitting here
+    expect(pos.initialRisk).toBe(5);
+    const q0 = pos.originalQty;
+
+    // 1R = 105: half closes there, well before the target
+    stubFetchPrice(105);
+    await monitorTick(cfg);
+    const half = (await getPositions())["ENSUSDT"];
+    expect(half.qty).toBeCloseTo(q0 / 2, 6);
+
+    // the remainder closes at the final target
+    stubFetchPrice(130);
+    await monitorTick(cfg);
+    expect((await getPositions())["ENSUSDT"]).toBeUndefined();
   });
 });

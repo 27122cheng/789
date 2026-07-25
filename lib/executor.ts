@@ -395,23 +395,29 @@ async function placeEntry(
 }
 
 /**
- * The first target still BEYOND `entry` in the trade's direction, falling back to
- * the furthest one.
+ * The target to attach to an ENTRY order: the FURTHEST one still beyond `entry`.
  *
- * An add enters later and further along than the main position, so the first
- * target can already be behind it - attaching 止盈一 to a tranche that entered
- * above it would take a loss the moment it fills, or be rejected outright.
+ * An attachment covers the whole order, so attaching 止盈一 would close the
+ * entire position at the first target and defeat 分批止盈 - the split targets are
+ * laid out as separate orders once the position exists. Taking the furthest
+ * instead means the attachment can only ever close everything at the final
+ * target, which is the conservative outcome for the window before those orders
+ * are in place.
+ *
+ * Targets already behind `entry` are excluded: an add enters further along than
+ * the main position, so 止盈一 can sit below it, and attaching that would book a
+ * loss the moment it fills. If nothing is beyond, no target is attached at all -
+ * the stop still is.
  */
-function targetBeyond(
+function attachTarget(
   side: "long" | "short",
   entry: number,
   takeProfits: number[]
 ): number | null {
-  if (!takeProfits.length) return null;
   const beyond = takeProfits.filter((t) =>
     side === "long" ? t > entry : t < entry
   );
-  return beyond.length ? beyond[0] : takeProfits[takeProfits.length - 1];
+  return beyond.length ? beyond[beyond.length - 1] : null;
 }
 
 /**
@@ -645,8 +651,15 @@ export async function executeSignal(
           addCount: 0,
           dryRun: !live,
         };
+        // R levels are how a single-target trade gets split. When the signal
+        // carries several targets, splitting across those is used instead, so
+        // applying both would have two mechanisms closing the same position.
+        const targetsCount = common.takeProfits.length;
+        const rApplies =
+          !!rt?.enabled &&
+          (rt.applyWhen === "always" || targetsCount <= 1);
         const mkR = (risk: number | null) =>
-          rt?.enabled && risk
+          rApplies && risk
             ? rt.levels.map((l) => ({ r: l.r, closePercent: l.closePercent, done: false }))
             : [];
 
@@ -731,7 +744,10 @@ export async function executeSignal(
                   client, true, sym, signal.side, sizeUsdt, "limit", aligned.entry, refPrice, leverage,
                   settings.trading.orders.belowMinSize ?? "lift",
                   settings.trading.orders.exchangeStops
-                    ? { stopLoss: slForRisk, takeProfit: common.takeProfits[0] ?? null }
+                    ? {
+                        stopLoss: slForRisk,
+                        takeProfit: attachTarget(signal.side, aligned.entry, common.takeProfits),
+                      }
                     : undefined
                 );
                 mode = "limit_order";
@@ -775,7 +791,11 @@ export async function executeSignal(
         }
 
         // otherwise fill now at market
-        const tpForAttach = common.takeProfits[0] ?? null;
+        const tpForAttach = attachTarget(
+          signal.side,
+          refPrice ?? aligned.entry ?? 0,
+          common.takeProfits
+        );
         const res = await placeEntry(
           client, live, sym, signal.side, sizeUsdt, "market", null, refPrice ?? aligned.entry, leverage,
           settings.trading.orders.belowMinSize ?? "lift",
@@ -846,7 +866,7 @@ export async function executeSignal(
             settings.trading.orders.exchangeStops
               ? {
                   stopLoss: p.stopLoss,
-                  takeProfit: targetBeyond(p.side, addLevel, p.takeProfits),
+                  takeProfit: attachTarget(p.side, addLevel, p.takeProfits),
                 }
               : undefined
           );
@@ -875,7 +895,7 @@ export async function executeSignal(
             true, true,
             `加倉確認：已掛限價單 @ ${addLevel}（回踩成交）` +
               (r.attached
-                ? `，已附帶止損 ${p.stopLoss ?? "-"}（與主倉相同）／止盈 ${targetBeyond(p.side, addLevel, p.takeProfits) ?? "-"}`
+                ? `，已附帶止損 ${p.stopLoss ?? "-"}（與主倉相同）／止盈 ${attachTarget(p.side, addLevel, p.takeProfits) ?? "-"}`
                 : "") +
               (stopChanged ? `；止損同步更新為 ${p.stopLoss}` : "；止損維持 " + (p.stopLoss ?? "-")) +
               (afterFill != null ? `；成交後將改為 ${afterFill}` : "") +

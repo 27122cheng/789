@@ -49,6 +49,7 @@ export default function SettingsPage() {
   const [splitTp, setSplitTp] = useState(true);
   const [rtpEnabled, setRtpEnabled] = useState(false);
   const [rtpLevels, setRtpLevels] = useState("1:50");
+  const [rtpApplyWhen, setRtpApplyWhen] = useState("single_target");
   const [trailEnabled, setTrailEnabled] = useState(false);
   const [trailActivate, setTrailActivate] = useState(2);
   const [trailCallback, setTrailCallback] = useState(1);
@@ -105,6 +106,7 @@ export default function SettingsPage() {
     setSplitTp(s.trading.orders.splitTakeProfit !== false);
     const rtp = s.trading.orders.rTakeProfit ?? { enabled: false, levels: [] };
     setRtpEnabled(!!rtp.enabled);
+    setRtpApplyWhen(rtp.applyWhen ?? "single_target");
     setRtpLevels(
       (rtp.levels ?? []).map((l: any) => `${l.r}:${l.closePercent}`).join(", ") || "1:50"
     );
@@ -173,6 +175,7 @@ export default function SettingsPage() {
             splitTakeProfit: splitTp,
             rTakeProfit: {
               enabled: rtpEnabled,
+              applyWhen: rtpApplyWhen,
               levels: rtpLevels
                 .split(/[,\n]/)
                 .map((s) => s.trim())
@@ -484,10 +487,19 @@ export default function SettingsPage() {
         <input type="text" value={rtpLevels}
                onChange={(e) => setRtpLevels(e.target.value)}
                placeholder="1:50, 2:30, 3:20" />
+        <label>套用時機</label>
+        <select value={rtpApplyWhen} onChange={(e) => setRtpApplyWhen(e.target.value)}>
+          <option value="single_target">只在信號只有一個止盈時（建議）</option>
+          <option value="always">一律套用</option>
+        </select>
         <p className="hint">
-          R = 進場價到止損價的距離（單筆風險）。例如 <code>1:50, 2:30</code> 代表：
-          帳面獲利到達 <b>1R</b> 先平倉 <b>50%</b>，到達 <b>2R</b> 再平 <b>30%</b>
-          （比例以「原始倉位」計算）。需要信號有止損才會啟用；與上面的價位止盈可並存。
+          R = 進場價到止損價的距離（單筆風險）。例如 <code>1:50</code> 代表帳面獲利到
+          <b> 1R</b> 先平 <b>50%</b>（比例以「原始倉位」計算），剩下的到止盈價再平。
+          需要信號有止損才會啟用。
+          <br />
+          <b>套用時機</b>：短線單有止盈一／止盈二，可以直接按價位分批，不需要 R；
+          長線單只有一個最終止盈，沒辦法按價位分，就靠 R 來分批。選「只在信號只有一個
+          止盈時」= 系統自動判斷該用哪一種，兩者不會同時平掉同一批倉位。
         </p>
       </div>
 

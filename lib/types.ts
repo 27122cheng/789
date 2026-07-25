@@ -232,6 +232,12 @@ export interface Settings {
       rTakeProfit: {
         enabled: boolean;
         levels: { r: number; closePercent: number }[];
+        // 短線單 carries 止盈一/止盈二, so it can be split across its own targets.
+        // 長線單 carries a single 最終止盈 and cannot, so R levels are what splits
+        // it. "single_target" applies them only in that case, which keeps the two
+        // mechanisms from both closing parts of the same position; "always"
+        // applies them regardless.
+        applyWhen: "single_target" | "always";
       };
     };
     trailing: {
@@ -305,8 +311,9 @@ export const DEFAULT_SETTINGS: Settings = {
       attachTakeProfit: true,
       splitTakeProfit: true,
       rTakeProfit: {
-        enabled: false,
+        enabled: true,
         levels: [{ r: 1, closePercent: 50 }],
+        applyWhen: "single_target",
       },
     },
     trailing: {
