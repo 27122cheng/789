@@ -870,3 +870,77 @@ describe("reconciling with the exchange", () => {
     expect(algos.length).toBeGreaterThan(0);
   });
 });
+
+describe("TP/SL attached to the entry order", () => {
+  function okxCfg() {
+    const cfg = settings();
+    cfg.exchange = "okx";
+    cfg.okx = {
+      apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false,
+    };
+    cfg.trading.liveTrading = true;
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.risk.maxOpenPositions = 50;
+    cfg.trading.orders.entryType = "market";
+    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 600, percentBalance: 5 };
+    return cfg;
+  }
+  function stub(orders: any[], algos: any[], instId: string, opts: { rejectAttach?: boolean } = {}) {
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any[] = [];
+      if (url.includes("/account/config")) data = [{ posMode: "net_mode" }];
+      else if (url.includes("/public/instruments")) {
+        data = [{ instId, ctVal: "0.1", lotSz: "0.1", minSz: "0.1", tickSz: "0.001" }];
+      } else if (url.includes("/market/ticker")) data = [{ last: "3000" }];
+      else if (url.includes("/account/positions")) data = [];
+      else if (url.includes("/orders-algo-pending")) data = [];
+      else if (url.includes("/order-algo")) { algos.push(body); data = [{ algoId: "A-7", sCode: "0" }]; }
+      else if (url.includes("/trade/order")) {
+        if (opts.rejectAttach && body?.attachAlgoOrds) {
+          return { ok: true, status: 200, json: async () => ({
+            code: "1", data: [{ sCode: "51076", sMsg: "attachAlgoOrds invalid" }],
+          }) };
+        }
+        orders.push(body);
+        data = [{ ordId: "F-1", sCode: "0" }];
+      }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+  }
+
+  it("sends SL and TP as separate attachments on the entry order", async () => {
+    const cfg = okxCfg();
+    const orders: any[] = [];
+    const algos: any[] = [];
+    stub(orders, algos, "FIL-USDT-SWAP");
+    await handleIncomingMessage("FILUSDT LONG Entry: 3000 SL: 2900 TP1: 3100", meta(), cfg);
+
+    expect(orders).toHaveLength(1);
+    const attach = orders[0].attachAlgoOrds;
+    expect(attach).toHaveLength(2);                    // never combined (51076)
+    expect(attach[0].slTriggerPx).toBe("2900.000");
+    expect(attach[0].slOrdPx).toBe("-1");
+    expect(attach[1].tpTriggerPx).toBe("3100.000");
+    // a single target is fully covered by the attachment - no extra algo orders
+    expect(algos).toHaveLength(0);
+    const rec = (await getOrders()).find((o) => o.symbol === "FILUSDT" && o.success);
+    expect(rec!.message).toContain("已附帶止盈止損");
+  });
+
+  it("still opens the position when the attachment is rejected", async () => {
+    const cfg = okxCfg();
+    const orders: any[] = [];
+    const algos: any[] = [];
+    stub(orders, algos, "GRT-USDT-SWAP", { rejectAttach: true });
+    await handleIncomingMessage("GRTUSDT SHORT Entry: 3000 SL: 3100 TP1: 2900", meta(), cfg);
+
+    // retried without the attachment rather than losing the trade
+    expect(orders).toHaveLength(1);
+    expect(orders[0].attachAlgoOrds).toBeUndefined();
+    expect((await getPositions())["GRTUSDT"]).toBeDefined();
+    // and protection was placed separately instead
+    expect(algos.length).toBeGreaterThan(0);
+  });
+});

@@ -17,6 +17,7 @@
  */
 import { createHmac } from "node:crypto";
 import {
+  AttachRejectedError,
   ExchangeClient,
   OrderFilters,
   PlaceOrderOpts,
@@ -334,6 +335,28 @@ export class OkxClient implements ExchangeClient {
     };
     if (opts.type === "LIMIT" && opts.price !== undefined) body.px = opts.price;
 
+    // Attach the protective levels to the order itself, so a filled position is
+    // never momentarily unprotected and stays protected even if nothing else
+    // runs afterwards. TP and SL must be SEPARATE entries - combining them in
+    // one attachment is rejected with 51076.
+    if (opts.attach) {
+      const dec = decimalsOf(info.tickSz) ?? 8;
+      const attach: Record<string, string>[] = [];
+      if (opts.attach.stopLoss != null && opts.attach.stopLoss > 0) {
+        attach.push({
+          slTriggerPx: opts.attach.stopLoss.toFixed(dec),
+          slOrdPx: "-1",                      // close at market on trigger
+        });
+      }
+      if (opts.attach.takeProfit != null && opts.attach.takeProfit > 0) {
+        attach.push({
+          tpTriggerPx: opts.attach.takeProfit.toFixed(dec),
+          tpOrdPx: "-1",
+        });
+      }
+      if (attach.length) body.attachAlgoOrds = attach;
+    }
+
     if ((await this.posMode()) === "long_short_mode") {
       // 雙向持倉: every order must name the position it acts on. Closing is
       // the OPPOSITE side of the position being reduced (sell closes a long).
@@ -347,11 +370,26 @@ export class OkxClient implements ExchangeClient {
     }
     if (opts.clientOrderId) body.clOrdId = opts.clientOrderId;
 
-    const rows = await this.request("POST", "/api/v5/trade/order", {}, body);
+    let rows: any[];
+    try {
+      rows = await this.request("POST", "/api/v5/trade/order", {}, body);
+    } catch (e) {
+      // Distinguish "the attached TP/SL was invalid" from "the order was
+      // invalid": the former can be retried bare so the trade still happens.
+      const msg = (e as Error).message;
+      if (body.attachAlgoOrds && /\b(51076|51277|51278|51279|51280)\b|attachAlgo/i.test(msg)) {
+        throw new AttachRejectedError(msg);
+      }
+      throw e;
+    }
     const first = rows[0] ?? {};
     // a per-order failure can still arrive under a top-level code of "0"
     if (first.sCode !== undefined && String(first.sCode) !== "0") {
-      throw new OkxApiError(`OKX API error (${first.sCode}): ${first.sMsg ?? ""}`, String(first.sCode), first);
+      const msg = `OKX API error (${first.sCode}): ${first.sMsg ?? ""}`;
+      if (body.attachAlgoOrds && /\b(51076|51277|51278|51279|51280)\b|attachAlgo/i.test(msg)) {
+        throw new AttachRejectedError(msg);
+      }
+      throw new OkxApiError(msg, String(first.sCode), first);
     }
     return { orderId: first.ordId ? String(first.ordId) : null, raw: first };
   }

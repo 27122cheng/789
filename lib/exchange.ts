@@ -30,7 +30,14 @@ export interface PlaceOrderOpts {
   price?: string;                 // LIMIT only
   reduceOnly?: boolean;
   clientOrderId?: string;
+  /** Protective levels attached to THIS order, so they exist from the moment
+   *  it fills without depending on anything else running. */
+  attach?: { stopLoss?: number | null; takeProfit?: number | null };
 }
+
+/** Thrown when the venue rejected the ATTACHED protective levels specifically,
+ *  meaning the order itself was never created and can be retried bare. */
+export class AttachRejectedError extends Error {}
 
 export interface ExchangeClient {
   /** Normalized symbol ("BTCUSDT") -> the venue's perp symbol. */

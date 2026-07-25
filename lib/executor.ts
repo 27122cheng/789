@@ -10,7 +10,7 @@
  * stop orders - but it is only as granular as how often the monitor runs.
  */
 import { parseSignal, dedupKey, isFiltered } from "./parser";
-import { ExchangeClient } from "./exchange";
+import { AttachRejectedError, ExchangeClient } from "./exchange";
 import { ceilToDecimals, floorToDecimals } from "./num";
 import { PionexApiError, PionexClient } from "./pionex";
 import { OkxClient } from "./okx";
@@ -263,8 +263,11 @@ async function placeEntry(
   limitPrice: number | null,
   refPrice: number | null,
   leverage?: number,
-  belowMinSize: "lift" | "skip" = "lift"
-): Promise<{ qty: number; price: number; orderIds: string[]; note: string }> {
+  belowMinSize: "lift" | "skip" = "lift",
+  // attached to the entry order so the position is protected the instant it
+  // fills, with no dependence on the monitor
+  protect?: { stopLoss: number | null; takeProfit: number | null }
+): Promise<{ qty: number; price: number; orderIds: string[]; note: string; attached: boolean }> {
   const perp = client.perpSymbol(symbol);
   const price = limitPrice ?? refPrice;
   if (!price || price <= 0) throw new Error(`no price available for ${symbol}`);
@@ -276,6 +279,7 @@ async function placeEntry(
       price,
       orderIds: [],
       note: `dry-run: simulated ${entryType} ${side} ${symbol} ${sizeUsdt} USDT @ ${price}`,
+      attached: false,
     };
   }
 
@@ -324,26 +328,47 @@ async function placeEntry(
   const qtyStr = qty.toFixed(baseDec);
 
   const apiSide = side === "long" ? "BUY" : "SELL";
-  let resp: Record<string, any>;
-  if (entryType === "limit" && limitPrice) {
-    // align the limit price to the price step to pass the PRICE filter
-    const priceStr =
-      f.quoteDecimals == null ? String(limitPrice) : limitPrice.toFixed(f.quoteDecimals);
-    resp = await client.placeOrder({
-      symbol: perp, side: apiSide, type: "LIMIT", size: qtyStr, price: priceStr,
-    });
-  } else {
+  const attach =
+    protect && (protect.stopLoss != null || protect.takeProfit != null)
+      ? { stopLoss: protect.stopLoss, takeProfit: protect.takeProfit }
+      : undefined;
+  let attached = !!attach;
+  let resp: Awaited<ReturnType<typeof client.placeOrder>>;
+  const send = (withAttach: boolean) => {
+    const common = { symbol: perp, side: apiSide, size: qtyStr } as const;
+    const extra = withAttach && attach ? { attach } : {};
+    if (entryType === "limit" && limitPrice) {
+      // align the limit price to the price step to pass the PRICE filter
+      const priceStr =
+        f.quoteDecimals == null ? String(limitPrice) : limitPrice.toFixed(f.quoteDecimals);
+      return client.placeOrder({ ...common, type: "LIMIT", price: priceStr, ...extra });
+    }
     // market order: size-based for both directions (perp) - no price filter
-    resp = await client.placeOrder({
-      symbol: perp, side: apiSide, type: "MARKET", size: qtyStr,
-    });
+    return client.placeOrder({ ...common, type: "MARKET", ...extra });
+  };
+
+  try {
+    resp = await send(true);
+  } catch (err) {
+    // Only the attached levels were rejected, so the order was never created:
+    // place it bare rather than losing the trade, and let the monitor add the
+    // protection separately.
+    if (err instanceof AttachRejectedError) {
+      attached = false;
+      resp = await send(false);
+    } else {
+      throw err;
+    }
   }
   const oid = resp.orderId;
   return {
     qty,
     price,
     orderIds: oid ? [oid] : [],
-    note: `${entryType} ${side} order placed (qty ${qtyStr})${liftedNote}`,
+    note:
+      `${entryType} ${side} order placed (qty ${qtyStr})${liftedNote}` +
+      (attached ? "；已附帶止盈止損" : ""),
+    attached,
   };
 }
 
@@ -597,7 +622,10 @@ export async function executeSignal(
               try {
                 const r = await placeEntry(
                   client, true, sym, signal.side, sizeUsdt, "limit", aligned.entry, refPrice, leverage,
-                  settings.trading.orders.belowMinSize ?? "lift"
+                  settings.trading.orders.belowMinSize ?? "lift",
+                  settings.trading.orders.exchangeStops
+                    ? { stopLoss: slForRisk, takeProfit: common.takeProfits[0] ?? null }
+                    : undefined
                 );
                 mode = "limit_order";
                 orderId = r.orderIds[0] ?? null;
@@ -640,9 +668,13 @@ export async function executeSignal(
         }
 
         // otherwise fill now at market
+        const tpForAttach = common.takeProfits[0] ?? null;
         const res = await placeEntry(
           client, live, sym, signal.side, sizeUsdt, "market", null, refPrice ?? aligned.entry, leverage,
-          settings.trading.orders.belowMinSize ?? "lift"
+          settings.trading.orders.belowMinSize ?? "lift",
+          settings.trading.orders.exchangeStops
+            ? { stopLoss: slForRisk, takeProfit: tpForAttach }
+            : undefined
         );
         const initialRisk =
           slForRisk != null ? Math.abs(res.price - slForRisk) : null;
@@ -658,7 +690,13 @@ export async function executeSignal(
         };
         await savePositions(positions);
         await setCooldown(sym, Date.now());
-        const stopNote = await syncExchangeStops(client, settings, live, positions[sym]);
+        // the attached levels already cover a single-target trade; only fall
+        // back to separate orders when they cannot express it
+        const needsExtraStops =
+          !res.attached || tpSlices(settings, positions[sym]).length > 1;
+        const stopNote = needsExtraStops
+          ? await syncExchangeStops(client, settings, live, positions[sym])
+          : null;
         await record("open",
           { symbol: sym, side: signal.side, sizeUsdt, qty: res.qty, price: res.price, leverage },
           live, true, res.note + (stopNote ? `；${stopNote}` : ""), res.orderIds);
