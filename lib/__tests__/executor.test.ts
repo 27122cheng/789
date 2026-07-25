@@ -434,6 +434,7 @@ describe("加密掃描 Pro pipeline behaviours", () => {
     const cfg = settings();
     cfg.trading.risk.cooldownSeconds = 0;
     cfg.trading.addArmSeconds = 0; // arm immediately in tests
+    cfg.trading.autoArmAddLevels = true; // this test covers self-judged timing
     await handleIncomingMessage(LONG_TERM, meta(), cfg);
     let positions = await getPositions();
     let pos = positions["ONEUSDT"];
@@ -1221,5 +1222,57 @@ describe("加倉 notification sequence end-to-end", () => {
       meta(), cfg
     );
     expect((await getPositions())["AAVEUSDT"].stopLoss).toBe(101.8);
+  });
+});
+
+describe("加倉計劃 levels vs 加倉確認 signals", () => {
+  it("does not self-fill plan levels when the provider confirms adds itself", async () => {
+    const cfg = settings();
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.risk.maxOpenPositions = 50;
+    cfg.trading.addArmSeconds = 0;          // would arm instantly if enabled
+    cfg.trading.autoArmAddLevels = false;   // provider drives adds
+
+    await handleIncomingMessage(
+      `🔵 加密掃描 Pro — 長線單升級信號\nJTO/USDT 做多\n進場： $100\n止損： $95\n止盈一： $120\n加倉 1： $103`,
+      meta(), cfg
+    );
+    let pos = (await getPositions())["JTOUSDT"];
+    expect(pos.pendingAdds).toHaveLength(1);   // level remembered for reference
+    const qty0 = pos.qty;
+
+    // price runs beyond the level and pulls back - would trigger a self-add
+    stubFetchPrice(104);
+    await monitorTick(cfg);
+    stubFetchPrice(103);
+    await monitorTick(cfg);
+
+    pos = (await getPositions())["JTOUSDT"];
+    expect(pos.addCount).toBe(0);
+    expect(pos.qty).toBe(qty0);
+    expect(pos.pendingAdds).toHaveLength(1);   // still waiting on 加倉確認
+  });
+
+  it("still self-fills when explicitly enabled", async () => {
+    const cfg = settings();
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.risk.maxOpenPositions = 50;
+    cfg.trading.addArmSeconds = 0;
+    cfg.trading.autoArmAddLevels = true;
+
+    await handleIncomingMessage(
+      `🔵 加密掃描 Pro — 長線單升級信號\nPYTH/USDT 做多\n進場： $100\n止損： $95\n止盈一： $120\n加倉 1： $103`,
+      meta(), cfg
+    );
+    const qty0 = (await getPositions())["PYTHUSDT"].qty;
+
+    stubFetchPrice(104);
+    await monitorTick(cfg);
+    stubFetchPrice(103);
+    await monitorTick(cfg);
+
+    const pos = (await getPositions())["PYTHUSDT"];
+    expect(pos.addCount).toBe(1);
+    expect(pos.qty).toBeGreaterThan(qty0);
   });
 });

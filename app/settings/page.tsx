@@ -38,6 +38,7 @@ export default function SettingsPage() {
   const [blacklist, setBlacklist] = useState("");
   const [maxOpenPositions, setMaxOpenPositions] = useState(5);
   const [maxAdds, setMaxAdds] = useState(2);
+  const [autoArmAdds, setAutoArmAdds] = useState(false);
   const [cooldown, setCooldown] = useState(30);
   const [maxAge, setMaxAge] = useState(120);
   const [entryType, setEntryType] = useState("market");
@@ -93,6 +94,7 @@ export default function SettingsPage() {
     setBlacklist((s.trading.risk.symbolBlacklist ?? []).join(", "));
     setMaxOpenPositions(s.trading.risk.maxOpenPositions);
     setMaxAdds(s.trading.risk.maxAddsPerPosition);
+    setAutoArmAdds(!!s.trading.autoArmAddLevels);
     setCooldown(s.trading.risk.cooldownSeconds);
     setMaxAge(s.trading.risk.maxSignalAgeSeconds);
     setEntryType(s.trading.orders.entryType);
@@ -148,6 +150,7 @@ export default function SettingsPage() {
             basis: sizingBasis,
           },
           addPositionUsdt: Number(addPositionUsdt),
+          autoArmAddLevels: autoArmAdds,
           leverage: {
             default: Number(levDefault), max: Number(levMax),
             whenUnspecified: levWhenUnspecified,
@@ -421,6 +424,11 @@ export default function SettingsPage() {
               <option value="market">市價 (market)</option>
               <option value="limit">限價 (limit，用信號的入場價)</option>
             </select>
+            <p className="hint">
+              「自行判斷加倉時機」= 用長線單的加倉計劃價位，自己盯價站穩後回踩市價加倉。
+              若信號提供方已經自己做確認、會另外發「加倉確認｜請掛單」，
+              請<b>保持關閉</b> —— 兩邊都動作會對同一個價位加倉兩次。
+            </p>
             <label style={{ marginTop: 12 }}>金額低於交易所最低下單量時</label>
             <select value={belowMinSize} onChange={(e) => setBelowMinSize(e.target.value)}>
               <option value="lift">自動提高到最低量（一定會進場）</option>
@@ -434,6 +442,11 @@ export default function SettingsPage() {
             </p>
           </div>
           <div style={{ display: "flex", alignItems: "flex-end", gap: 16 }}>
+            <div className="checkbox">
+              <input type="checkbox" id="autoarm" checked={autoArmAdds}
+                     onChange={(e) => setAutoArmAdds(e.target.checked)} />
+              <label htmlFor="autoarm" style={{ margin: 0 }}>自行判斷加倉時機</label>
+            </div>
             <div className="checkbox">
               <input type="checkbox" id="exstops" checked={exchangeStops}
                      onChange={(e) => setExchangeStops(e.target.checked)} />

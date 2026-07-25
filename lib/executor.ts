@@ -1229,6 +1229,14 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
         continue;   // done with this tranche either way
       }
 
+      // Self-judged timing is off by default: the provider confirms the
+      // breakout and sends 加倉確認｜請掛單, so arming the same level here as
+      // well would add to the position twice. The level is kept for reference.
+      if (!settings.trading.autoArmAddLevels) {
+        remaining.push(add);
+        continue;
+      }
+
       const beyond =
         add.level < pos.entryPrice ? price <= add.level : price >= add.level;
       const pulledBack =

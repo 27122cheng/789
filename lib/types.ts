@@ -177,6 +177,12 @@ export interface Settings {
     addPositionUsdt: number; // 加倉每次的名目 USDT，0 = 與主要 sizing 相同
     // 加倉位掛單前，價格需越過該價位持續的秒數（之後回踩到位才成交）
     addArmSeconds: number;
+    // Whether to judge add timing OURSELVES from the 加倉計劃 levels carried by a
+    // 長線單 upgrade signal (watch the level, arm it after addArmSeconds, fill on
+    // the pullback). Leave off when the signal provider confirms the breakout
+    // itself and sends an explicit 加倉確認｜請掛單 message - otherwise both act
+    // on the same level and the position is added to twice.
+    autoArmAddLevels: boolean;
     leverage: {
       default: number;
       max: number;
@@ -274,6 +280,7 @@ export const DEFAULT_SETTINGS: Settings = {
     },
     addPositionUsdt: 0,
     addArmSeconds: 60,
+    autoArmAddLevels: false,
     leverage: { default: 10, max: 20, whenUnspecified: "max" },
     risk: {
       symbolWhitelist: [],
