@@ -5,7 +5,7 @@
  * ticker response where needed.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { handleIncomingMessage, monitorTick } from "../executor";
+import { dropPosition, handleIncomingMessage, monitorTick } from "../executor";
 import { getOrders, getPositions, getSignals, getTrades, savePositions } from "../store";
 import { DEFAULT_SETTINGS, Settings } from "../types";
 
@@ -2061,5 +2061,76 @@ describe("a limit entry the venue refuses", () => {
       "EOSUSDT LONG Entry: 1 SL: 0.9 TP1: 1.5", meta(), cfg
     );
     expect((await getPositions())["EOSUSDT"].pendingEntry!.mode).toBe("watch");
+  });
+});
+
+describe("deleting one tracked position", () => {
+  it("cancels a resting entry order, since nothing else would reconcile it", async () => {
+    const cancels: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      let data: any[] = [];
+      if (url.includes("/public/instruments")) {
+        data = [{ instId: "ALGO-USDT-SWAP", ctVal: "1", lotSz: "0.1", minSz: "0.1", tickSz: "0.0001" }];
+      } else if (url.includes("/trade/cancel-order")) {
+        cancels.push(JSON.parse(init.body).ordId);
+        data = [{ ordId: "PEND-1", sCode: "0" }];
+      }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+    const cfg = settings();
+    cfg.exchange = "okx";
+    cfg.okx = {
+      apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false,
+    };
+    cfg.trading.liveTrading = true;
+
+    await savePositions({
+      ALGOUSDT: {
+        symbol: "ALGOUSDT", side: "long", entryPrice: 0.2, qty: 0, originalQty: 0,
+        sizeUsdt: 10, leverage: 10, stopLoss: 0.18, takeProfits: [0.25],
+        tpCountOriginal: 1, tpHit: [], addCount: 0, pendingAdds: [], openedAt: Date.now(),
+        dryRun: false, initialRisk: 0.02, rTargets: [],
+        pendingEntry: { target: 0.2, dir: "down", mode: "limit_order", orderId: "PEND-1", qty: 50 },
+      } as any,
+    });
+
+    const res = await dropPosition("ALGOUSDT", cfg);
+    expect(res).toMatchObject({ found: true, cancelledEntry: true, warning: null });
+    expect(cancels).toEqual(["PEND-1"]);
+    expect((await getPositions())["ALGOUSDT"]).toBeUndefined();
+  });
+
+  it("leaves a real open position and its exchange stops alone", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      calls.push(url);
+      return { ok: true, status: 200, json: async () => ({ code: "0", data: [] }) };
+    }));
+    const cfg = settings();
+    cfg.trading.liveTrading = true;
+    cfg.pionex.apiKey = "k";
+    cfg.pionex.apiSecret = "s";
+
+    await savePositions({
+      RUNEUSDT: {
+        symbol: "RUNEUSDT", side: "short", entryPrice: 4, qty: 10, originalQty: 10,
+        sizeUsdt: 40, leverage: 10, stopLoss: 4.2, takeProfits: [3.5],
+        tpCountOriginal: 1, tpHit: [], addCount: 0, pendingAdds: [], openedAt: Date.now(),
+        dryRun: false, initialRisk: 0.2, rTargets: [], pendingEntry: null,
+      } as any,
+    });
+
+    const res = await dropPosition("RUNEUSDT", cfg);
+    expect(res).toMatchObject({ found: true, cancelledEntry: false });
+    expect((await getPositions())["RUNEUSDT"]).toBeUndefined();
+    // an accidental click must not close anything or strip its protection
+    expect(calls.some((u) => /cancel|order/i.test(u))).toBe(false);
+    const rec = (await getOrders()).find((o) => o.symbol === "RUNEUSDT");
+    expect(rec?.message).toMatch(/真實持倉與止盈止損未更動/);
+  });
+
+  it("reports an unknown symbol instead of pretending it deleted something", async () => {
+    expect(await dropPosition("NOSUCHUSDT", settings())).toMatchObject({ found: false });
   });
 });

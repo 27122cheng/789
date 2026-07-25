@@ -1262,6 +1262,65 @@ export async function executeSignal(
   }
 }
 
+/**
+ * Removes ONE tracked position, for the dashboard's per-row delete.
+ *
+ * Deliberately does not touch a real open position: the exchange is the source
+ * of truth and its stop/take-profit orders stay in place, so an accidental
+ * click cannot leave money unprotected. The monitor simply stops managing it.
+ *
+ * A resting ENTRY order is the exception. It exists only because of this record
+ * and nothing else would ever reconcile it, so leaving it would let it fill
+ * later into a position nothing is tracking. It is cancelled with the record.
+ */
+export async function dropPosition(
+  symbol: string,
+  settings: Settings
+): Promise<{ found: boolean; cancelledEntry: boolean; warning: string | null }> {
+  const positions = await getPositions();
+  const pos = positions[symbol];
+  if (!pos) return { found: false, cancelledEntry: false, warning: null };
+
+  let cancelledEntry = false;
+  let warning: string | null = null;
+  const pending = pos.pendingEntry;
+  if (pending?.mode === "limit_order" && pending.orderId && isLive(settings) && !pos.dryRun) {
+    const client = makeClient(settings);
+    try {
+      await client.cancelOrder(client.perpSymbol(symbol), String(pending.orderId));
+      cancelledEntry = true;
+    } catch (err) {
+      // still remove the record - the user asked for that - but say plainly
+      // that an order they cannot see here may still be resting
+      warning =
+        `交易所上的進場掛單取消失敗（${(err as Error).message}），` +
+        `請自行到 ${venueName(settings)} 撤單，否則它成交後不會有人管理。`;
+    }
+  }
+
+  delete positions[symbol];
+  await savePositions(positions);
+  await appendOrder({
+    at: Date.now(),
+    action: "cancel",
+    symbol,
+    side: pos.side,
+    sizeUsdt: pos.sizeUsdt,
+    qty: pos.qty,
+    price: null,
+    leverage: pos.leverage,
+    dryRun: pos.dryRun,
+    success: true,
+    message:
+      `手動從網站刪除持倉紀錄` +
+      (cancelledEntry ? "，並取消交易所的進場掛單" : "") +
+      (pos.qty > 0 ? "（交易所上的真實持倉與止盈止損未更動）" : "") +
+      (warning ? `；⚠️ ${warning}` : ""),
+    orderIds: [],
+  });
+  return { found: true, cancelledEntry, warning };
+}
+
 // -------------------------------------------------------------- monitoring
 /** One monitor tick: trailing-stop ratchet + soft SL/TP enforcement.
  *  Returns a human-readable list of the actions it took. */

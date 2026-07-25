@@ -67,6 +67,34 @@ export default function Dashboard() {
     }
   }
 
+  async function deletePosition(p: any) {
+    const resting = p.pendingEntry?.mode === "limit_order";
+    const held = p.qty > 0;
+    if (
+      !confirm(
+        `刪除 ${p.symbol} 的持倉紀錄？\n\n` +
+          (held
+            ? "⚠️ 交易所上的真實持倉與止盈止損不會更動，只是本系統不再管理它" +
+              "（移動止損、分批止盈都會停止）。\n"
+            : "") +
+          (resting ? "交易所上的進場掛單會一併取消。\n" : "") +
+          "\n刪除後這個幣種就能接受新的訊號。"
+      )
+    ) {
+      return;
+    }
+    const { status, body } = await apiFetch("/api/positions/delete", {
+      method: "POST",
+      body: JSON.stringify({ symbol: p.symbol }),
+    });
+    if (status === 200) {
+      if (body?.warning) alert(body.warning);
+      await load();
+    } else {
+      alert(body?.error ?? `刪除失敗 (HTTP ${status})`);
+    }
+  }
+
   async function clearLogs() {
     if (!confirm("確定清空所有紀錄？（訂單／動作紀錄與收到的訊息，不影響持倉與設定）")) return;
     const { status, body } = await apiFetch("/api/logs/clear", { method: "POST" });
@@ -178,7 +206,7 @@ export default function Dashboard() {
                   <th>幣種</th><th>方向</th><th>槓桿</th><th>均價</th>
                   <th>數量</th><th>名目 USDT</th><th>止損</th><th>止盈</th>
                   <th>交易所保護單</th>
-                  <th>加倉位</th><th>加倉次數</th><th>模式</th>
+                  <th>加倉位</th><th>加倉次數</th><th>模式</th><th></th>
                 </tr>
               </thead>
               <tbody>
@@ -208,6 +236,24 @@ export default function Dashboard() {
                             : "⏳ 待進場 ")
                         : ""}
                       {p.dryRun ? "模擬" : "真實"}
+                    </td>
+                    <td>
+                      <button
+                        onClick={() => deletePosition(p)}
+                        title={`刪除 ${p.symbol} 的追蹤紀錄`}
+                        aria-label={`刪除 ${p.symbol} 的追蹤紀錄`}
+                        style={{
+                          background: "transparent",
+                          color: "var(--red)",
+                          border: "none",
+                          padding: "2px 6px",
+                          fontSize: 16,
+                          lineHeight: 1,
+                          cursor: "pointer",
+                        }}
+                      >
+                        ✕
+                      </button>
                     </td>
                   </tr>
                 ))}
