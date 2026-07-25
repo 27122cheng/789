@@ -605,6 +605,51 @@ export async function executeSignal(
             ? rt.levels.map((l) => ({ r: l.r, closePercent: l.closePercent, done: false }))
             : [];
 
+        // Last line of defence against stacking a second position on the same
+        // symbol. The tracker already blocks a duplicate open, but it can be
+        // out of sync with reality - records cleared, KV reset, a position
+        // opened by hand, or a close that silently failed - and the exchange is
+        // the only authority on what is actually held.
+        if (live && client.fetchPositions) {
+          const venue = client.perpSymbol(sym);
+          const held = (await client.fetchPositions().catch(() => []))
+            .find((p) => p.symbol === venue && p.qty > 0);
+          if (held) {
+            if (held.side !== signal.side) {
+              // opposite direction: opening would hedge or flip the position,
+              // which no signal asked for. Needs a human, so say so.
+              await record("open",
+                { symbol: sym, side: signal.side, sizeUsdt, qty: 0, price: aligned.entry, leverage },
+                live, false,
+                `交易所已有${held.side === "long" ? "多" : "空"}單持倉（${held.qty} @ ${held.entryPrice}），` +
+                  `本次為${signal.side === "long" ? "多" : "空"}單訊號，方向衝突 → 已略過，未下任何單`);
+              return;
+            }
+            // same direction: don't open again - adopt the existing position so
+            // this signal's stop/targets manage it from here.
+            const risk = slForRisk != null ? Math.abs(held.entryPrice - slForRisk) : null;
+            positions[sym] = {
+              ...common,
+              entryPrice: held.entryPrice,
+              qty: held.qty,
+              originalQty: held.qty,
+              initialRisk: risk,
+              rTargets: mkR(risk),
+              orderIds: [],
+              pendingEntry: null,
+            };
+            await savePositions(positions);
+            await setCooldown(sym, Date.now());
+            const adoptNote = await syncExchangeStops(client, settings, live, positions[sym]);
+            await record("open",
+              { symbol: sym, side: signal.side, sizeUsdt, qty: held.qty, price: held.entryPrice, leverage },
+              live, true,
+              `交易所已有同向持倉（${held.qty} @ ${held.entryPrice}）→ 未重複下單，` +
+                `改為接管並套用本次的止損／止盈` + (adoptNote ? `；${adoptNote}` : ""));
+            return;
+          }
+        }
+
         // entryType "limit" + a target the market hasn't reached yet: rest a
         // REAL limit order on Pionex at the signal's entry price so it fills at
         // exactly that price. If Pionex rejects it (price band / filters), fall

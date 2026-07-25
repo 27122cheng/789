@@ -1018,3 +1018,69 @@ describe("加倉確認 tranche", () => {
     expect(pos.stopLoss).toBe(99);                 // main stop still untouched
   });
 });
+
+describe("never stack a second position on the same symbol", () => {
+  function okxCfg() {
+    const cfg = settings();
+    cfg.exchange = "okx";
+    cfg.okx = {
+      apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false,
+    };
+    cfg.trading.liveTrading = true;
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.risk.maxOpenPositions = 50;
+    cfg.trading.orders.entryType = "market";
+    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 600, percentBalance: 5 };
+    return cfg;
+  }
+  function stub(orders: any[], instId: string, held: any[]) {
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any[] = [];
+      if (url.includes("/account/config")) data = [{ posMode: "net_mode" }];
+      else if (url.includes("/public/instruments")) {
+        data = [{ instId, ctVal: "0.1", lotSz: "0.1", minSz: "0.1", tickSz: "0.1" }];
+      } else if (url.includes("/market/ticker")) data = [{ last: "100" }];
+      else if (url.includes("/account/positions")) data = held;
+      else if (url.includes("/orders-algo-pending")) data = [];
+      else if (url.includes("algo")) data = [{ algoId: "A-1", sCode: "0" }];
+      else if (url.includes("/trade/order")) { orders.push(body); data = [{ ordId: "X-1", sCode: "0" }]; }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+  }
+
+  it("adopts an untracked same-direction position instead of opening another", async () => {
+    const cfg = okxCfg();
+    const orders: any[] = [];
+    // OKX holds 30 INJ long that our tracker knows nothing about
+    stub(orders, "INJ-USDT-SWAP", [
+      { instId: "INJ-USDT-SWAP", pos: "300", posSide: "net", avgPx: "98" },
+    ]);
+    await handleIncomingMessage("INJUSDT LONG Entry: 100 SL: 95 TP1: 110", meta(), cfg);
+
+    // no entry order was sent
+    expect(orders.filter((o) => o.ordType).length).toBe(0);
+    const pos = (await getPositions())["INJUSDT"];
+    expect(pos.qty).toBe(30);            // 300 contracts x ctVal 0.1
+    expect(pos.entryPrice).toBe(98);     // the exchange's average, not 100
+    expect(pos.stopLoss).toBe(95);       // this signal's stop now manages it
+    const rec = (await getOrders()).find((o) => o.symbol === "INJUSDT");
+    expect(rec!.message).toContain("未重複下單");
+  });
+
+  it("refuses when the held position is the opposite direction", async () => {
+    const cfg = okxCfg();
+    const orders: any[] = [];
+    stub(orders, "TIA-USDT-SWAP", [
+      { instId: "TIA-USDT-SWAP", pos: "-300", posSide: "net", avgPx: "98" },
+    ]);
+    await handleIncomingMessage("TIAUSDT LONG Entry: 100 SL: 95 TP1: 110", meta(), cfg);
+
+    expect(orders.filter((o) => o.ordType).length).toBe(0);
+    expect((await getPositions())["TIAUSDT"]).toBeUndefined();
+    const rec = (await getOrders()).find((o) => o.symbol === "TIAUSDT");
+    expect(rec!.success).toBe(false);
+    expect(rec!.message).toContain("方向衝突");
+  });
+});
