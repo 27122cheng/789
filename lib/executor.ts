@@ -782,10 +782,15 @@ export async function executeSignal(
         // leave the MAIN stop alone - the signal says it moves later, under its
         // own notice; the stop quoted here belongs to this tranche only.
         if (signal.entryPrice != null && addLive) {
-          // Protect the tranche on the order itself: its OWN stop (the signal
-          // gives one per tranche) and the position's current first target,
-          // which is what "加倉的止盈按照原本設定的" means.
-          const trancheSl = signal.stopLoss ?? p.stopLoss;
+          // Protect the tranche on the order itself, using the MAIN position's
+          // stop and first target - an add is meant to run on the same stop as
+          // the rest of the position. Attaching the tranche's own (tighter)
+          // stop instead would let the added size be stopped out on its own
+          // during the window before the fill is noticed, while the main
+          // position kept running. The tranche stop is recorded for reference;
+          // the position's stop moves for everything at once when the
+          // 加倉確認通知 (止損上移) arrives.
+          const trancheSl = p.stopLoss;
           const r = await placeEntry(
             client, true, sym, p.side, sizeUsdt, "limit", signal.entryPrice, refPrice, p.leverage,
             settings.trading.orders.belowMinSize ?? "lift",
@@ -813,8 +818,9 @@ export async function executeSignal(
             true, true,
             `加倉確認：已掛限價單 @ ${signal.entryPrice}（回踩成交）` +
               (r.attached
-                ? `，已附帶此筆止損 ${trancheSl ?? "-"}／止盈 ${p.takeProfits[0] ?? "-"}`
-                : signal.stopLoss ? `，此筆止損 ${signal.stopLoss}` : "") +
+                ? `，已附帶止損 ${trancheSl ?? "-"}／止盈 ${p.takeProfits[0] ?? "-"}（與主倉相同）`
+                : "") +
+              (signal.stopLoss ? `；訊號的此筆止損 ${signal.stopLoss} 僅供參考` : "") +
               "；主倉止損不變，等後續通知",
             r.orderIds);
           return;

@@ -999,9 +999,10 @@ describe("加倉確認 tranche", () => {
     // a resting LIMIT order at the tranche price, not a market buy
     const limitOrder = orders.find((o) => o.ordType === "limit");
     expect(limitOrder.px).toBe("103.0");
-    // the tranche is protected by the order itself, at ITS own stop
+    // the tranche is protected on the order itself, at the MAIN position's
+    // stop - not the tighter tranche stop, so it cannot be stopped out alone
     expect(limitOrder.attachAlgoOrds).toHaveLength(2);
-    expect(limitOrder.attachAlgoOrds[0].slTriggerPx).toBe("101.5");
+    expect(limitOrder.attachAlgoOrds[0].slTriggerPx).toBe("99.0");
     expect(limitOrder.attachAlgoOrds[1].tpTriggerPx).toBe("110.0");
     // the tranche's stop must NOT retighten the whole position
     expect(pos.stopLoss).toBe(99);
@@ -1274,5 +1275,69 @@ describe("加倉計劃 levels vs 加倉確認 signals", () => {
     const pos = (await getPositions())["PYTHUSDT"];
     expect(pos.addCount).toBe(1);
     expect(pos.qty).toBeGreaterThan(qty0);
+  });
+});
+
+describe("an add runs on the same stop as the main position", () => {
+  it("uses the main stop before the fill and after, never the tranche's own", async () => {
+    const cfg = settings();
+    cfg.exchange = "okx";
+    cfg.okx = { apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false };
+    cfg.trading.liveTrading = true;
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.risk.maxOpenPositions = 50;
+    cfg.trading.orders.entryType = "market";
+    cfg.trading.addPositionUsdt = 600;
+    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 600, percentBalance: 5, basis: "notional" };
+
+    const orders: any[] = [];
+    const algos: any[] = [];
+    let resting: any[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any[] = [];
+      if (url.includes("/account/config")) data = [{ posMode: "net_mode" }];
+      else if (url.includes("/public/instruments")) {
+        data = [{ instId: "SEIB-USDT-SWAP", ctVal: "0.1", lotSz: "0.1", minSz: "0.1", tickSz: "0.1" }];
+      } else if (url.includes("/market/ticker")) data = [{ last: "100" }];
+      else if (url.includes("/account/positions")) data = [];
+      else if (url.includes("/orders-algo-pending")) data = [];
+      else if (url.includes("/trade/orders-pending")) data = resting;
+      else if (url.includes("/order-algo")) { algos.push(body); data = [{ algoId: "A-1", sCode: "0" }]; }
+      else if (url.includes("algo")) data = [{ algoId: "A-1", sCode: "0" }];
+      else if (url.includes("/trade/order")) { orders.push(body); data = [{ ordId: "SB-1", sCode: "0" }]; }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+
+    await handleIncomingMessage("SEIBUSDT LONG Entry: 100 SL: 99 TP1: 110", meta(), cfg);
+
+    // the tranche names a tighter stop of its own; it must not be used
+    await handleIncomingMessage(
+      `📌 加倉確認 #1｜請掛單 — SEIB ▲ 做多
+🎯 掛限價單於：$103（回踩此價成交）
+🛑 此筆止損：$101.5
+📌 主倉進場：$100　主倉止損：$99`,
+      meta(), cfg
+    );
+    const limit = orders.find((o) => o.ordType === "limit");
+    expect(limit.attachAlgoOrds[0].slTriggerPx).toBe("99.0");
+
+    // after the fill, everything is still protected at the one main stop
+    resting = [];
+    await monitorTick(cfg);
+    const pos = (await getPositions())["SEIBUSDT"];
+    expect(pos.addCount).toBe(1);
+    expect(pos.stopLoss).toBe(99);
+    const lastStop = algos.filter((a) => a.slTriggerPx).pop();
+    expect(lastStop.slTriggerPx).toBe("99.0");
+
+    // and a 止損上移 moves the whole position together
+    await handleIncomingMessage(
+      `📈 加倉確認通知 #1 — SEIB ▲ 做多\n成交價：$103\n🔧 止損上移至：$101.8`,
+      meta(), cfg
+    );
+    expect((await getPositions())["SEIBUSDT"].stopLoss).toBe(101.8);
+    expect(algos.filter((a) => a.slTriggerPx).pop().slTriggerPx).toBe("101.8");
   });
 });
