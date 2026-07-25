@@ -30,9 +30,14 @@ export interface PlaceOrderOpts {
   price?: string;                 // LIMIT only
   reduceOnly?: boolean;
   clientOrderId?: string;
-  /** Protective levels attached to THIS order, so they exist from the moment
-   *  it fills without depending on anything else running. */
-  attach?: { stopLoss?: number | null; takeProfit?: number | null };
+  /** Protective levels attached to THIS order, so the FULL plan exists from the
+   *  moment it fills without depending on anything else running. Several targets
+   *  may be given, each with the slice it closes (OKX calls these Split TPs and
+   *  allows up to 10). */
+  attach?: {
+    stopLoss?: number | null;
+    takeProfits?: { price: number; size: string }[];
+  };
 }
 
 /** Thrown when the venue rejected the ATTACHED protective levels specifically,

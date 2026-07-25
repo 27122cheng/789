@@ -362,12 +362,18 @@ export class OkxClient implements ExchangeClient {
     };
     if (opts.type === "LIMIT" && opts.price !== undefined) body.px = opts.price;
 
-    // Attach the protective levels to the order itself, so a filled position is
-    // never momentarily unprotected and stays protected even if nothing else
-    // runs afterwards. TP and SL must be SEPARATE entries - combining them in
-    // one attachment is rejected with 51076.
+    // Attach the whole protective plan to the order itself, so a filled position
+    // is never momentarily unprotected and needs nothing else to run afterwards.
+    //
+    // OKX rules honoured here:
+    //  - TP and SL must be SEPARATE entries; combining them is rejected (51076)
+    //  - at most 10 Split TP entries (51079)
+    //  - a Split TP entry needs its own sz, and slices below the contract
+    //    minimum cannot be placed, so those are skipped rather than rounded up
     if (opts.attach) {
       const dec = decimalsOf(info.tickSz) ?? 8;
+      const lotDec = this.lotDecimals(info);
+      const minSz = Number(info.minSz) || 0;
       const attach: Record<string, string>[] = [];
       if (opts.attach.stopLoss != null && opts.attach.stopLoss > 0) {
         attach.push({
@@ -375,11 +381,20 @@ export class OkxClient implements ExchangeClient {
           slOrdPx: "-1",                      // close at market on trigger
         });
       }
-      if (opts.attach.takeProfit != null && opts.attach.takeProfit > 0) {
-        attach.push({
-          tpTriggerPx: opts.attach.takeProfit.toFixed(dec),
+      const tps = (opts.attach.takeProfits ?? []).filter((t) => t.price > 0);
+      const single = tps.length === 1;
+      for (const tp of tps.slice(0, 10)) {
+        const entry: Record<string, string> = {
+          tpTriggerPx: tp.price.toFixed(dec),
           tpOrdPx: "-1",
-        });
+        };
+        // a lone target covers the whole order, so it needs no size
+        if (!single) {
+          const contracts = this.contractsFor(info, Number(tp.size));
+          if (contracts <= 0 || (minSz > 0 && contracts < minSz)) continue;
+          entry.sz = contracts.toFixed(lotDec);
+        }
+        attach.push(entry);
       }
       if (attach.length) body.attachAlgoOrds = attach;
     }

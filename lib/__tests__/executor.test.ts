@@ -1021,9 +1021,11 @@ describe("加倉確認 tranche", () => {
     expect(limitOrder.px).toBe("103.0");
     // the tranche is protected on the order itself, at the MAIN position's
     // stop - not the tighter tranche stop, so it cannot be stopped out alone
-    expect(limitOrder.attachAlgoOrds).toHaveLength(2);
     expect(limitOrder.attachAlgoOrds[0].slTriggerPx).toBe("99.0");
-    expect(limitOrder.attachAlgoOrds[1].tpTriggerPx).toBe("110.0");
+    // and the whole take-profit plan rides along: an R level plus the target
+    const tps = limitOrder.attachAlgoOrds.filter((a: any) => a.tpTriggerPx);
+    expect(tps.length).toBeGreaterThan(1);
+    expect(tps[tps.length - 1].tpTriggerPx).toBe("110.0");
     // the tranche's stop must NOT retighten the whole position
     expect(pos.stopLoss).toBe(99);
     expect(pos.qty).toBe(qtyBefore);           // nothing added until it fills
@@ -1604,7 +1606,8 @@ describe("an add's attached target must be beyond the tranche's entry", () => {
     // the attachment covers the whole order, so it takes the FURTHEST target -
     // attaching 止盈一 would close everything there and defeat 分批止盈
     const main = orders.find((o) => o.ordType === "market");
-    expect(main.attachAlgoOrds[1].tpTriggerPx).toBe("98000");
+    const mainTps = main.attachAlgoOrds.filter((a: any) => a.tpTriggerPx);
+    expect(mainTps[mainTps.length - 1].tpTriggerPx).toBe("98000");
 
     await handleIncomingMessage(
       `📌 加倉確認 #1｜請掛單 — TON ▲ 做多
@@ -1614,7 +1617,9 @@ describe("an add's attached target must be beyond the tranche's entry", () => {
     );
     const add = orders.find((o) => o.ordType === "limit");
     // attaching 96000 to a tranche entering at 96800 would book an instant loss
-    expect(add.attachAlgoOrds[1].tpTriggerPx).toBe("98000");
+    const addTps = add.attachAlgoOrds.filter((a: any) => a.tpTriggerPx);
+    expect(addTps[addTps.length - 1].tpTriggerPx).toBe("98000");
+    expect(addTps.every((a: any) => Number(a.tpTriggerPx) > 96800)).toBe(true);
   });
 });
 
@@ -1760,5 +1765,94 @@ describe("finished-trade history", () => {
     expect(t.pnlUsdt).toBeCloseTo(q0 * (94 - 100), 4);
     expect(t.pnlUsdt).toBeLessThan(0);
     expect(t.reason).toBe("sl_hit");
+  });
+});
+
+describe("the whole take-profit plan rides on the entry order", () => {
+  it("attaches the R level and the final target with their own sizes", async () => {
+    const cfg = settings();
+    cfg.exchange = "okx";
+    cfg.okx = { apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false };
+    cfg.trading.liveTrading = true;
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.risk.maxOpenPositions = 50;
+    cfg.trading.orders.entryType = "market";
+    cfg.trading.orders.rTakeProfit = {
+      enabled: true, levels: [{ r: 1, closePercent: 50 }], applyWhen: "always",
+    };
+    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 1000, percentBalance: 5, basis: "notional" };
+
+    const orders: any[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any[] = [];
+      if (url.includes("/account/config")) data = [{ posMode: "net_mode" }];
+      else if (url.includes("/public/instruments")) {
+        data = [{ instId: "PEPE-USDT-SWAP", ctVal: "1", lotSz: "1", minSz: "1", tickSz: "1" }];
+      } else if (url.includes("/market/ticker")) data = [{ last: "100" }];
+      else if (url.includes("/account/positions")) data = [];
+      else if (url.includes("/orders-algo-pending")) data = [];
+      else if (url.includes("orders-pending")) data = [];
+      else if (url.includes("ordId=")) data = [{ state: "filled" }];
+      else if (url.includes("algo")) data = [{ algoId: "A-1", sCode: "0" }];
+      else if (url.includes("/trade/order")) { orders.push(body); data = [{ ordId: "P-1", sCode: "0" }]; }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+
+    // entry 100, stop 90 -> R = 10, so 1R = 110; final target 150
+    await handleIncomingMessage("PEPEUSDT LONG Entry: 100 SL: 90 最終止盈: 150", meta(), cfg);
+
+    const o = orders[0];
+    const attach = o.attachAlgoOrds;
+    expect(attach[0].slTriggerPx).toBe("90");            // stop covers the whole order
+    expect(attach[0].sz).toBeUndefined();
+
+    const tps = attach.filter((a: any) => a.tpTriggerPx);
+    expect(tps.map((t: any) => t.tpTriggerPx)).toEqual(["110", "150"]);
+    // 1000 USDT / 100 = 10 units; half at 1R, half at the target
+    expect(tps[0].sz).toBe("5");
+    expect(tps[1].sz).toBe("5");
+    // everything closes at market when triggered
+    expect(tps.every((t: any) => t.tpOrdPx === "-1")).toBe(true);
+  });
+
+  it("omits an R level that would sit beyond the final target", async () => {
+    const cfg = settings();
+    cfg.exchange = "okx";
+    cfg.okx = { apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false };
+    cfg.trading.liveTrading = true;
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.risk.maxOpenPositions = 50;
+    cfg.trading.orders.entryType = "market";
+    cfg.trading.orders.rTakeProfit = {
+      enabled: true, levels: [{ r: 1, closePercent: 50 }], applyWhen: "always",
+    };
+    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 1000, percentBalance: 5, basis: "notional" };
+
+    const orders: any[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any[] = [];
+      if (url.includes("/account/config")) data = [{ posMode: "net_mode" }];
+      else if (url.includes("/public/instruments")) {
+        data = [{ instId: "FLOKI-USDT-SWAP", ctVal: "1", lotSz: "1", minSz: "1", tickSz: "1" }];
+      } else if (url.includes("/market/ticker")) data = [{ last: "100" }];
+      else if (url.includes("/account/positions")) data = [];
+      else if (url.includes("/orders-algo-pending")) data = [];
+      else if (url.includes("orders-pending")) data = [];
+      else if (url.includes("ordId=")) data = [{ state: "filled" }];
+      else if (url.includes("algo")) data = [{ algoId: "A-1", sCode: "0" }];
+      else if (url.includes("/trade/order")) { orders.push(body); data = [{ ordId: "F-1", sCode: "0" }]; }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+
+    // R = 20 so 1R = 120, but the target is only 110 -> close it all there
+    await handleIncomingMessage("FLOKIUSDT LONG Entry: 100 SL: 80 最終止盈: 110", meta(), cfg);
+
+    const tps = orders[0].attachAlgoOrds.filter((a: any) => a.tpTriggerPx);
+    expect(tps.map((t: any) => t.tpTriggerPx)).toEqual(["110"]);
+    expect(tps[0].sz).toBeUndefined();   // a lone target covers the whole order
   });
 });

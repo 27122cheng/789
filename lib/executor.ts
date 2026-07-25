@@ -287,9 +287,12 @@ async function placeEntry(
   refPrice: number | null,
   leverage?: number,
   belowMinSize: "lift" | "skip" = "lift",
-  // attached to the entry order so the position is protected the instant it
-  // fills, with no dependence on the monitor
-  protect?: { stopLoss: number | null; takeProfit: number | null }
+  // attached to the entry order so the FULL protective plan is live the instant
+  // it fills, with no dependence on the monitor
+  protect?: {
+    stopLoss: number | null;
+    takeProfits: { price: number; size: string }[];
+  }
 ): Promise<{ qty: number; price: number; orderIds: string[]; note: string; attached: boolean }> {
   const perp = client.perpSymbol(symbol);
   const price = limitPrice ?? refPrice;
@@ -352,8 +355,8 @@ async function placeEntry(
 
   const apiSide = side === "long" ? "BUY" : "SELL";
   const attach =
-    protect && (protect.stopLoss != null || protect.takeProfit != null)
-      ? { stopLoss: protect.stopLoss, takeProfit: protect.takeProfit }
+    protect && (protect.stopLoss != null || protect.takeProfits.length > 0)
+      ? { stopLoss: protect.stopLoss, takeProfits: protect.takeProfits }
       : undefined;
   let attached = !!attach;
   let resp: Awaited<ReturnType<typeof client.placeOrder>>;
@@ -419,6 +422,58 @@ function attachTarget(
     side === "long" ? t > entry : t < entry
   );
   return beyond.length ? beyond[beyond.length - 1] : null;
+}
+
+/**
+ * The complete protective plan for a position that is about to be opened, so it
+ * can ride along ON the entry order.
+ *
+ * Every level is computable up front: R prices come from entry and stop, and the
+ * final target comes from the signal. Placing them with the order means the plan
+ * is live the instant it fills, instead of waiting for the next monitor tick -
+ * which is the difference between a partial take-profit happening and not
+ * happening if this app stops running.
+ *
+ * The monitor still re-derives slices later from the position's ACTUAL remaining
+ * size; this is the opening snapshot.
+ */
+function entryProtection(
+  settings: Settings,
+  side: "long" | "short",
+  entry: number,
+  stopLoss: number | null,
+  qty: number,
+  takeProfits: number[]
+): { price: number; size: number }[] {
+  const dir = side === "long" ? 1 : -1;
+  const rt = settings.trading.orders.rTakeProfit;
+  const rApplies =
+    !!rt?.enabled && (rt.applyWhen !== "single_target" || takeProfits.length <= 1);
+  const risk = stopLoss != null ? Math.abs(entry - stopLoss) : 0;
+  const out: { price: number; size: number }[] = [];
+  let left = qty;
+
+  // whatever is left exits at the furthest target the trade can still reach
+  const finalTp = attachTarget(side, entry, takeProfits);
+
+  if (rApplies && risk > 0) {
+    for (const l of rt.levels) {
+      const price = entry + dir * l.r * risk;
+      // An R level at or beyond the final target is pointless: the target closes
+      // everything there anyway. Dropping it is what "沒有那麼多 R 就在止盈二
+      // 全平" means in practice.
+      if (finalTp != null && (side === "long" ? price >= finalTp : price <= finalTp)) {
+        break;
+      }
+      const size = Math.min(left, (qty * l.closePercent) / 100);
+      if (size <= 0) break;
+      out.push({ price, size });
+      left -= size;
+    }
+  }
+  if (finalTp != null && left > 0) out.push({ price: finalTp, size: left });
+  else if (!out.length && finalTp != null) out.push({ price: finalTp, size: qty });
+  return out;
 }
 
 /**
@@ -495,6 +550,21 @@ async function syncExchangeStops(
   } catch (err) {
     return `⚠️ 交易所止盈止損掛單失敗：${(err as Error).message}（本系統監控仍會執行）`;
   }
+}
+
+/** Snaps a plan's prices to the venue's tick (targets round DOWN) and renders the
+ *  sizes as strings for the order payload. */
+async function alignPlan(
+  client: ExchangeClient,
+  symbol: string,
+  plan: { price: number; size: number }[]
+): Promise<{ price: number; size: string }[]> {
+  if (!plan.length) return [];
+  const dec = await client.pricePrecision(symbol);
+  return plan.map((p) => ({
+    price: dec == null ? p.price : floorToDecimals(p.price, dec),
+    size: String(p.size),
+  }));
 }
 
 /** Books a close against the position's running totals, so a trade that scaled
@@ -793,7 +863,14 @@ export async function executeSignal(
                   settings.trading.orders.exchangeStops
                     ? {
                         stopLoss: slForRisk,
-                        takeProfit: attachTarget(signal.side, aligned.entry, common.takeProfits),
+                        takeProfits: await alignPlan(
+                          client, sym,
+                          entryProtection(
+                            settings, signal.side, aligned.entry!, slForRisk,
+                            aligned.entry! > 0 ? sizeUsdt / aligned.entry! : 0,
+                            common.takeProfits
+                          )
+                        ),
                       }
                     : undefined
                 );
@@ -838,16 +915,17 @@ export async function executeSignal(
         }
 
         // otherwise fill now at market
-        const tpForAttach = attachTarget(
-          signal.side,
-          refPrice ?? aligned.entry ?? 0,
-          common.takeProfits
+        const plannedEntry = refPrice ?? aligned.entry ?? 0;
+        const plannedQty = plannedEntry > 0 ? sizeUsdt / plannedEntry : 0;
+        const tpPlan = await alignPlan(
+          client, sym,
+          entryProtection(settings, signal.side, plannedEntry, slForRisk, plannedQty, common.takeProfits)
         );
         const res = await placeEntry(
           client, live, sym, signal.side, sizeUsdt, "market", null, refPrice ?? aligned.entry, leverage,
           settings.trading.orders.belowMinSize ?? "lift",
           settings.trading.orders.exchangeStops
-            ? { stopLoss: slForRisk, takeProfit: tpForAttach }
+            ? { stopLoss: slForRisk, takeProfits: tpPlan }
             : undefined
         );
         const initialRisk =
@@ -913,7 +991,14 @@ export async function executeSignal(
             settings.trading.orders.exchangeStops
               ? {
                   stopLoss: p.stopLoss,
-                  takeProfit: attachTarget(p.side, addLevel, p.takeProfits),
+                  takeProfits: await alignPlan(
+                    client, sym,
+                    entryProtection(
+                      settings, p.side, addLevel, p.stopLoss,
+                      addLevel > 0 ? sizeUsdt / addLevel : 0,
+                      p.takeProfits
+                    )
+                  ),
                 }
               : undefined
           );
@@ -955,7 +1040,17 @@ export async function executeSignal(
           client, addLive, sym, p.side, sizeUsdt, "market", null, refPrice, p.leverage,
           settings.trading.orders.belowMinSize ?? "lift",
           settings.trading.orders.exchangeStops
-            ? { stopLoss: p.stopLoss, takeProfit: p.takeProfits[0] ?? null }
+            ? {
+                stopLoss: p.stopLoss,
+                takeProfits: await alignPlan(
+                  client, sym,
+                  entryProtection(
+                    settings, p.side, refPrice ?? p.entryPrice, p.stopLoss,
+                    (refPrice ?? p.entryPrice) > 0 ? sizeUsdt / (refPrice ?? p.entryPrice) : 0,
+                    p.takeProfits
+                  )
+                ),
+              }
             : undefined
         );
         const newQty = p.qty + res.qty;
