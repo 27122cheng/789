@@ -85,8 +85,12 @@ export interface ExchangeClient {
     avgPrice: number | null;
   } | null>;
 
-  /** Every protective order on the account, so ones left behind by a position
-   *  that no longer exists can be cleaned up. */
+  /** Account-wide order snapshots. One call each answers "still resting?" and
+   *  "is this position protected?" for every symbol, instead of per-symbol
+   *  queries that multiply with the number of positions and invite rate limits. */
+  fetchAllOpenOrders?(): Promise<{ symbol: string; orderId: string }[]>;
+  /** Every protective order on the account, also used to clean up ones left
+   *  behind by a position that no longer exists. */
   fetchAllStopOrders?(): Promise<{ symbol: string; algoId: string }[]>;
   cancelStopOrderIds?(items: { symbol: string; algoId: string }[]): Promise<number>;
 

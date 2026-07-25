@@ -1081,6 +1081,43 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
     return realCache;
   };
 
+  // Same idea for orders: one account-wide snapshot of resting orders and of
+  // protective orders, reused for every symbol. Per-symbol queries multiply with
+  // the number of positions, and being rate-limited is what previously made the
+  // monitor mistake "query failed" for "no protection". null means the snapshot
+  // is unavailable this tick, and callers must then do nothing rather than guess.
+  let openCache: { symbol: string; orderId: string }[] | null | undefined;
+  const allOpenOrders = async () => {
+    if (openCache === undefined) {
+      openCache = client.fetchAllOpenOrders
+        ? await client.fetchAllOpenOrders().catch(() => null)
+        : null;
+    }
+    return openCache;
+  };
+  /** Is this order still resting? Uses the account-wide snapshot when the venue
+   *  offers one, else falls back to a per-symbol query. null = cannot tell. */
+  const isResting = async (venue: string, orderId: string): Promise<boolean | null> => {
+    if (client.fetchAllOpenOrders) {
+      const open = await allOpenOrders();
+      if (open == null) return null;
+      return open.some((o) => o.orderId === orderId && o.symbol === venue);
+    }
+    const open = await client.getOpenOrders(venue).catch(() => null);
+    if (open == null) return null;
+    return open.some((o: any) => String(o.orderId ?? o.id ?? "") === orderId);
+  };
+
+  let stopCache: { symbol: string; algoId: string }[] | null | undefined;
+  const allStopOrders = async () => {
+    if (stopCache === undefined) {
+      stopCache = client.fetchAllStopOrders
+        ? await client.fetchAllStopOrders().catch(() => null)
+        : null;
+    }
+    return stopCache;
+  };
+
   for (const sym of Object.keys(positions)) {
     const pos = positions[sym];
     const price = await fetchPriceSafe(client, sym, null);
@@ -1132,14 +1169,9 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
       // A real resting order fills on the exchange; detect it by the order
       // leaving the open-orders book.
       if (mode === "limit_order") {
-        const open = await client
-          .getOpenOrders(client.perpSymbol(sym))
-          .catch(() => null);
-        if (open == null) continue; // can't tell right now - check again later
         const oid = pos.pendingEntry.orderId;
-        const stillResting = open.some(
-          (o: any) => String(o.orderId ?? o.id ?? "") === String(oid)
-        );
+        const stillResting = await isResting(client.perpSymbol(sym), String(oid));
+        if (stillResting == null) continue; // can't tell right now - retry later
         if (stillResting) continue; // still waiting at the entry price
 
         // Gone from the book means filled OR cancelled. Ask which: booking a
@@ -1273,9 +1305,17 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
     if (
       settings.trading.orders.exchangeStops &&
       live && !pos.dryRun && pos.qty > 0 &&
-      client.countStopOrders && client.placeStopOrders
+      client.placeStopOrders
     ) {
-      const existing = await client.countStopOrders(client.perpSymbol(sym)).catch(() => -1);
+      const venue = client.perpSymbol(sym);
+      // null/-1 = unknown this tick; only a KNOWN-empty result may place orders
+      let existing = -1;
+      if (client.fetchAllStopOrders) {
+        const stops = await allStopOrders();
+        if (stops != null) existing = stops.filter((o) => o.symbol === venue).length;
+      } else if (client.countStopOrders) {
+        existing = await client.countStopOrders(venue).catch(() => -1);
+      }
       if (existing === 0) {
         const note = await syncExchangeStops(client, settings, live, pos);
         if (note) {
@@ -1327,16 +1367,11 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
       // A 加倉確認 tranche rests as a real order on the exchange; it is filled
       // when it leaves the book, exactly like the entry order.
       if (add.orderId && live && !pos.dryRun) {
-        const open = await client
-          .getOpenOrders(client.perpSymbol(sym))
-          .catch(() => null);
-        if (open == null) {
+        const resting = await isResting(client.perpSymbol(sym), String(add.orderId));
+        if (resting == null) {
           remaining.push(add);   // can't tell right now, check again later
           continue;
         }
-        const resting = open.some(
-          (o: any) => String(o.orderId ?? o.id ?? "") === String(add.orderId)
-        );
         if (resting) {
           remaining.push(add);
           continue;
@@ -1586,12 +1621,12 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
   // are reduce-only so they cannot open anything, but they accumulate and make
   // "is this position protected?" unanswerable. Remove the ones whose symbol is
   // no longer held anywhere.
-  if (live && client.fetchAllStopOrders && client.cancelStopOrderIds && client.fetchPositions) {
+  if (live && client.cancelStopOrderIds) {
     try {
-      const [stops, held] = await Promise.all([
-        client.fetchAllStopOrders(),
-        client.fetchPositions(),
-      ]);
+      // both already fetched for this tick; re-fetching would double the cost
+      const stops = await allStopOrders();
+      const held = await realPositions();
+      if (stops == null || held == null) throw new Error("snapshot unavailable");
       const heldSymbols = new Set(held.filter((h) => h.qty > 0).map((h) => h.symbol));
       const trackedSymbols = new Set(
         Object.values(positions)

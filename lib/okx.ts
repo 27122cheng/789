@@ -538,6 +538,20 @@ export class OkxClient implements ExchangeClient {
     return out;
   }
 
+  /** Every pending (non-algo) order on the account.
+   *
+   *  One account-wide call answers "is this order still resting?" for every
+   *  tracked order, instead of one call per symbol - the per-symbol version is
+   *  what pushed the monitor into rate limiting. */
+  async fetchAllOpenOrders(): Promise<{ symbol: string; orderId: string }[]> {
+    const rows = await this.request("GET", "/api/v5/trade/orders-pending", {
+      instType: "SWAP",
+    });
+    return rows
+      .filter((r: any) => r?.ordId && r?.instId)
+      .map((r: any) => ({ symbol: String(r.instId), orderId: String(r.ordId) }));
+  }
+
   /** Every pending algo order on the account, for orphan cleanup. */
   async fetchAllStopOrders(): Promise<{ symbol: string; algoId: string }[]> {
     const out: { symbol: string; algoId: string }[] = [];

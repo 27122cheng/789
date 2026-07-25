@@ -704,8 +704,8 @@ describe("exchange-side stops", () => {
       else if (url.includes("/public/instruments")) {
         data = [{ instId: "TRX-USDT-SWAP", ctVal: "0.1", lotSz: "0.1", minSz: "0.1", tickSz: "0.001" }];
       } else if (url.includes("/market/ticker")) data = [{ last: "3000" }];
-      else if (url.includes("/orders-algo-pending")) data = algos.length ? [{ algoId: "A-1" }] : [];
-      else if (url.includes("/cancel-algos")) { cancels.push(body); data = [{ algoId: "A-1" }]; }
+      else if (url.includes("/orders-algo-pending")) data = algos.length ? [{ algoId: "A-1", instId: "TRX-USDT-SWAP" }] : [];
+      else if (url.includes("/cancel-algos")) { cancels.push(body); data = [{ algoId: "A-1", instId: "TRX-USDT-SWAP" }]; }
       else if (url.includes("/order-algo")) { algos.push(body); data = [{ algoId: "A-1", sCode: "0" }]; }
       else if (url.includes("orders-pending")) data = [];
       else if (url.includes("ordId=")) data = [{ state: "filled" }];
@@ -803,8 +803,8 @@ describe("self-healing exchange stops", () => {
       else if (url.includes("/public/instruments")) {
         data = [{ instId: "WLD-USDT-SWAP", ctVal: "0.1", lotSz: "0.1", minSz: "0.1", tickSz: "0.0001" }];
       } else if (url.includes("/market/ticker")) data = [{ last: "3000" }];
-      else if (url.includes("/orders-algo-pending")) data = algos.length ? [{ algoId: "A-9" }] : [];
-      else if (url.includes("/cancel-algos")) data = [{ algoId: "A-9" }];
+      else if (url.includes("/orders-algo-pending")) data = algos.length ? [{ algoId: "A-9", instId: "WLD-USDT-SWAP" }] : [];
+      else if (url.includes("/cancel-algos")) data = [{ algoId: "A-9", instId: "WLD-USDT-SWAP" }];
       else if (url.includes("/order-algo")) { algos.push(body); data = [{ algoId: "A-9", sCode: "0" }]; }
       else if (url.includes("orders-pending")) data = [];
       else if (url.includes("ordId=")) data = [{ state: "filled" }];
@@ -857,9 +857,9 @@ describe("reconciling with the exchange", () => {
         data = [{ instId: "SEI-USDT-SWAP", ctVal: "1", lotSz: "1", minSz: "1", tickSz: "0.0001" }];
       } else if (url.includes("/market/ticker")) data = [{ last: "3.1" }];
       else if (url.includes("/account/positions")) data = exchangePositions;
-      else if (url.includes("/orders-algo-pending")) data = algos.length ? [{ algoId: "A-3" }] : [];
+      else if (url.includes("/orders-algo-pending")) data = algos.length ? [{ algoId: "A-3", instId: "SEI-USDT-SWAP" }] : [];
       else if (url.includes("/order-algo")) { algos.push(body); data = [{ algoId: "A-3", sCode: "0" }]; }
-      else if (url.includes("/trade/orders-pending")) data = placed ? [{ ordId: "P-1" }] : [];
+      else if (url.includes("/trade/orders-pending")) data = placed ? [{ ordId: "P-1", instId: "SEI-USDT-SWAP" }] : [];
       else if (url.includes("ordId=")) data = [{ state: "filled" }];
       else if (url.includes("/trade/order")) { placed = true; data = [{ ordId: "P-1", sCode: "0" }]; }
       return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
@@ -1026,7 +1026,7 @@ describe("加倉確認 tranche", () => {
     expect(pos.pendingAdds[0].orderId).toBe("ADD-1");
 
     // still resting -> unchanged
-    openOrders = [{ ordId: "ADD-1" }];
+    openOrders = [{ ordId: "ADD-1", instId: "ARB-USDT-SWAP" }];
     await monitorTick(cfg);
     expect((await getPositions())["ARBUSDT"].qty).toBe(qtyBefore);
 
@@ -1219,7 +1219,7 @@ describe("加倉 notification sequence end-to-end", () => {
     expect(orders.length).toBe(entryOrders + 1);
 
     // ④ timed out -> that order is cancelled and the POSITION survives
-    resting = [{ ordId: "AD-1" }];
+    resting = [{ ordId: "AD-1", instId: "ENA-USDT-SWAP" }];
     await handleIncomingMessage("⏹ 加倉掛單失效 #1 — ENA ▲ 做多\n請撤單", meta(), cfg);
     expect(cancels.map((c) => c.ordId)).toContain("AD-1");
     const after = (await getPositions())["ENAUSDT"];
@@ -1385,7 +1385,7 @@ describe("an untracked resting order also blocks a new entry", () => {
       else if (url.includes("/account/positions")) data = [];       // no position…
       else if (url.includes("/orders-algo-pending")) data = [];
       // …but an order is resting that this system never recorded
-      else if (url.includes("orders-pending")) data = [{ ordId: "ORPHAN-1" }];
+      else if (url.includes("orders-pending")) data = [{ ordId: "ORPHAN-1", instId: "JASMY-USDT-SWAP" }];
       else if (url.includes("algo")) data = [{ algoId: "A-1", sCode: "0" }];
       else if (url.includes("ordId=")) data = [{ state: "filled" }];
       else if (url.includes("/trade/order")) { orders.push(body); data = [{ ordId: "N-1", sCode: "0" }]; }
@@ -1634,7 +1634,7 @@ describe("a cancelled order is not a fill", () => {
       } else if (url.includes("/market/ticker")) data = [{ last: "5.5" }];
       else if (url.includes("/account/positions")) data = [];       // never filled
       else if (url.includes("/orders-algo-pending")) data = [];
-      else if (url.includes("orders-pending")) data = placed && orderState === "live" ? [{ ordId: "R-1" }] : [];
+      else if (url.includes("orders-pending")) data = placed && orderState === "live" ? [{ ordId: "R-1", instId: "RNDR-USDT-SWAP" }] : [];
       else if (url.includes("ordId=")) data = [{ state: orderState, accFillSz: "0" }];
       else if (url.includes("algo")) data = [{ algoId: "A-1", sCode: "0" }];
       else if (url.includes("/trade/order")) { placed = true; data = [{ ordId: "R-1", sCode: "0" }]; }
