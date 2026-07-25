@@ -77,6 +77,14 @@ export interface ExchangeClient {
    *  can notice an unprotected position and place them. */
   countStopOrders?(venueSymbol: string): Promise<number>;
 
+  /** The real outcome of an order. Leaving the book means filled OR cancelled,
+   *  and the two must not be confused. */
+  getOrderState?(venueSymbol: string, orderId: string): Promise<{
+    state: string;
+    filledQty: number;
+    avgPrice: number | null;
+  } | null>;
+
   /** Every protective order on the account, so ones left behind by a position
    *  that no longer exists can be cleaned up. */
   fetchAllStopOrders?(): Promise<{ symbol: string; algoId: string }[]>;

@@ -395,6 +395,26 @@ async function placeEntry(
 }
 
 /**
+ * The first target still BEYOND `entry` in the trade's direction, falling back to
+ * the furthest one.
+ *
+ * An add enters later and further along than the main position, so the first
+ * target can already be behind it - attaching 止盈一 to a tranche that entered
+ * above it would take a loss the moment it fills, or be rejected outright.
+ */
+function targetBeyond(
+  side: "long" | "short",
+  entry: number,
+  takeProfits: number[]
+): number | null {
+  if (!takeProfits.length) return null;
+  const beyond = takeProfits.filter((t) =>
+    side === "long" ? t > entry : t < entry
+  );
+  return beyond.length ? beyond[0] : takeProfits[takeProfits.length - 1];
+}
+
+/**
  * How the remaining position is divided across its take-profit targets - the
  * same rule the monitor applies, so the exchange orders and the monitor agree:
  * with 分批止盈 on, each target closes an equal share of the ORIGINAL size and
@@ -824,7 +844,10 @@ export async function executeSignal(
             client, true, sym, p.side, sizeUsdt, "limit", addLevel, refPrice, p.leverage,
             settings.trading.orders.belowMinSize ?? "lift",
             settings.trading.orders.exchangeStops
-              ? { stopLoss: p.stopLoss, takeProfit: p.takeProfits[0] ?? null }
+              ? {
+                  stopLoss: p.stopLoss,
+                  takeProfit: targetBeyond(p.side, addLevel, p.takeProfits),
+                }
               : undefined
           );
           p.pendingAdds = [
@@ -852,7 +875,7 @@ export async function executeSignal(
             true, true,
             `加倉確認：已掛限價單 @ ${addLevel}（回踩成交）` +
               (r.attached
-                ? `，已附帶止損 ${p.stopLoss ?? "-"}／止盈 ${p.takeProfits[0] ?? "-"}（與主倉相同）`
+                ? `，已附帶止損 ${p.stopLoss ?? "-"}（與主倉相同）／止盈 ${targetBeyond(p.side, addLevel, p.takeProfits) ?? "-"}`
                 : "") +
               (stopChanged ? `；止損同步更新為 ${p.stopLoss}` : "；止損維持 " + (p.stopLoss ?? "-")) +
               (afterFill != null ? `；成交後將改為 ${afterFill}` : "") +
@@ -1118,13 +1141,37 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
           (o: any) => String(o.orderId ?? o.id ?? "") === String(oid)
         );
         if (stillResting) continue; // still waiting at the entry price
-        pos.entryPrice = target;
-        pos.qty = pos.pendingEntry.qty;
-        pos.originalQty = pos.pendingEntry.qty;
-        pos.initialRisk = pos.stopLoss != null ? Math.abs(target - pos.stopLoss) : null;
+
+        // Gone from the book means filled OR cancelled. Ask which: booking a
+        // cancelled order as a fill would invent a position that never existed.
+        let filledQty = pos.pendingEntry.qty;
+        let filledAt = target;
+        if (client.getOrderState && oid) {
+          const st = await client
+            .getOrderState(client.perpSymbol(sym), String(oid))
+            .catch(() => null);
+          if (st && st.state !== "filled" && st.filledQty <= 0) {
+            delete positions[sym];
+            changed = true;
+            actions.push(`${sym}: 進場掛單已取消／失效（狀態 ${st.state}）→ 移除追蹤`);
+            await record("cancel",
+              { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: 0, price: target, leverage: pos.leverage },
+              true, true,
+              `進場掛單未成交就消失（交易所狀態 ${st.state}）→ 移除追蹤，未持倉`);
+            continue;
+          }
+          if (st && st.filledQty > 0) {
+            filledQty = st.filledQty;
+            filledAt = st.avgPrice ?? target;
+          }
+        }
+        pos.entryPrice = filledAt;
+        pos.qty = filledQty;
+        pos.originalQty = filledQty;
+        pos.initialRisk = pos.stopLoss != null ? Math.abs(filledAt - pos.stopLoss) : null;
         pos.pendingEntry = null;
         changed = true;
-        actions.push(`${sym}: 限價單已成交 @ ${target}`);
+        actions.push(`${sym}: 限價單已成交 @ ${filledAt}`);
         const filledStopNote = await syncExchangeStops(client, settings, live, pos);
         if (filledStopNote) actions.push(`${sym}: ${filledStopNote}`);
         await record("open",
@@ -1294,11 +1341,28 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
           remaining.push(add);
           continue;
         }
-        const addQty = add.qty ?? 0;
+        let addQty = add.qty ?? 0;
+        let addAt = add.level;
+        if (client.getOrderState) {
+          const st = await client
+            .getOrderState(client.perpSymbol(sym), String(add.orderId))
+            .catch(() => null);
+          if (st && st.state !== "filled" && st.filledQty <= 0) {
+            actions.push(`${sym}: 加倉掛單已取消／失效（狀態 ${st.state}）→ 不計入持倉`);
+            await record("add_cancel",
+              { symbol: sym, side: pos.side, sizeUsdt: 0, qty: 0, price: add.level, leverage: pos.leverage },
+              true, true,
+              `加倉掛單未成交就消失（交易所狀態 ${st.state}）→ 未加倉，持倉不變`);
+            continue;   // drop the tranche without touching the position
+          }
+          if (st && st.filledQty > 0) {
+            addQty = st.filledQty;
+            addAt = st.avgPrice ?? add.level;
+          }
+        }
         if (addQty > 0) {
           const newQty = pos.qty + addQty;
-          pos.entryPrice =
-            (pos.entryPrice * pos.qty + add.level * addQty) / newQty;
+          pos.entryPrice = (pos.entryPrice * pos.qty + addAt * addQty) / newQty;
           pos.qty = newQty;
           pos.originalQty += addQty;
           pos.sizeUsdt += add.sizeUsdt ?? 0;

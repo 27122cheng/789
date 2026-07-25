@@ -315,6 +315,33 @@ export class OkxClient implements ExchangeClient {
     });
   }
 
+  /** What actually happened to an order, rather than inferring it from the order
+   *  having left the book - a CANCELLED order looks identical to a filled one
+   *  there, and treating one as the other invents or loses a position. */
+  async getOrderState(instId: string, orderId: string): Promise<{
+    state: string;                 // live | partially_filled | filled | canceled
+    filledQty: number;             // base-asset units actually filled
+    avgPrice: number | null;
+  } | null> {
+    const rows = await this.request("GET", "/api/v5/trade/order", {
+      instId, ordId: orderId,
+    });
+    const o = rows[0];
+    if (!o) return null;
+    const info = await this.infoFor(instId);
+    const ctVal = Number(info?.ctVal);
+    const contracts = Number(o.accFillSz);
+    const avg = Number(o.avgPx);
+    return {
+      state: String(o.state ?? ""),
+      filledQty:
+        Number.isFinite(contracts) && Number.isFinite(ctVal) && ctVal > 0
+          ? contracts * ctVal
+          : 0,
+      avgPrice: Number.isFinite(avg) && avg > 0 ? avg : null,
+    };
+  }
+
   async getOpenOrders(instId: string): Promise<any[]> {
     const rows = await this.request("GET", "/api/v5/trade/orders-pending", {
       instType: "SWAP", instId,
