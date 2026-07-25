@@ -189,6 +189,43 @@ export class OkxClient implements ExchangeClient {
       : contracts;
   }
 
+  /**
+   * Contract counts for a set of take-profit slices that together close the
+   * WHOLE position.
+   *
+   * Converting each slice on its own floors each one to the lot step, and the
+   * discarded fractions add up: a 307-contract position split in two becomes
+   * 153 + 153, leaving one contract that no target closes. That sliver survives
+   * the last take-profit, keeps the symbol showing as held (blocking the next
+   * signal), and is left without a stop once the protective orders are resized.
+   *
+   * So the residue is handed to the final slice being placed. Returns one entry
+   * per input slice, null where the slice is too small for the venue.
+   */
+  private splitContracts(
+    info: any,
+    totalContracts: number,
+    sizes: number[]
+  ): (number | null)[] {
+    const minSz = Number(info?.minSz) || 0;
+    const out: (number | null)[] = sizes.map((s) => {
+      const c = this.contractsFor(info, s);
+      return c > 0 && (minSz <= 0 || c >= minSz) ? c : null;
+    });
+    let last = -1;
+    for (let i = out.length - 1; i >= 0; i--) {
+      if (out[i] != null) { last = i; break; }
+    }
+    if (last >= 0 && Number.isFinite(totalContracts)) {
+      const used = out.reduce<number>((a, c) => a + (c ?? 0), 0);
+      const residue = totalContracts - used;
+      // only ever grows the last target, and it stays reduce-only, so it can
+      // never close more than the position actually holds
+      if (residue > 0) out[last] = (out[last] as number) + residue;
+    }
+    return out;
+  }
+
   private lotDecimals(info: any): number {
     return (info?.lotSz != null ? decimalsOf(info.lotSz) : 0) ?? 0;
   }
@@ -418,7 +455,6 @@ export class OkxClient implements ExchangeClient {
     if (opts.attach) {
       const dec = decimalsOf(info.tickSz) ?? 8;
       const lotDec = this.lotDecimals(info);
-      const minSz = Number(info.minSz) || 0;
       const attach: Record<string, string>[] = [];
       if (opts.attach.stopLoss != null && opts.attach.stopLoss > 0) {
         attach.push({
@@ -426,21 +462,25 @@ export class OkxClient implements ExchangeClient {
           slOrdPx: "-1",                      // close at market on trigger
         });
       }
-      const tps = (opts.attach.takeProfits ?? []).filter((t) => t.price > 0);
+      const tps = (opts.attach.takeProfits ?? []).filter((t) => t.price > 0).slice(0, 10);
       const single = tps.length === 1;
-      for (const tp of tps.slice(0, 10)) {
+      // sized against the order's own contract count, so the slices add up to it
+      const sliced = single
+        ? []
+        : this.splitContracts(info, Number(body.sz), tps.map((t) => Number(t.size)));
+      tps.forEach((tp, i) => {
         const entry: Record<string, string> = {
           tpTriggerPx: tp.price.toFixed(dec),
           tpOrdPx: "-1",
         };
         // a lone target covers the whole order, so it needs no size
         if (!single) {
-          const contracts = this.contractsFor(info, Number(tp.size));
-          if (contracts <= 0 || (minSz > 0 && contracts < minSz)) continue;
+          const contracts = sliced[i];
+          if (contracts == null) return;
           entry.sz = contracts.toFixed(lotDec);
         }
         attach.push(entry);
-      }
+      });
       if (attach.length) body.attachAlgoOrds = attach;
     }
 
@@ -512,7 +552,6 @@ export class OkxClient implements ExchangeClient {
 
     const dec = decimalsOf(info.tickSz) ?? 8;
     const lotDec = this.lotDecimals(info);
-    const minSz = Number(info.minSz) || 0;
     const hedge = (await this.posMode()) === "long_short_mode";
     // these orders only ever REDUCE the position
     const scope: Record<string, unknown> = hedge
@@ -562,17 +601,23 @@ export class OkxClient implements ExchangeClient {
       });
       if (id) ids.push(id);
     }
-    for (const tp of tps) {
-      // a slice below the venue minimum cannot be placed; skip it rather than
-      // rounding up, which would close more of the position than intended -
-      // the monitor still takes that target.
-      const contracts = this.contractsFor(info, Number(tp.size));
-      if (contracts <= 0 || (minSz > 0 && contracts < minSz)) continue;
+    // a slice below the venue minimum cannot be placed; it is skipped rather
+    // than rounded up, which would close more of the position than intended -
+    // the monitor still takes that target. Whatever the lot step shaves off the
+    // earlier slices goes to the final target, so the set closes the position.
+    const sliced = this.splitContracts(
+      info,
+      Number(this.szFromBase(info, Number(opts.size ?? 0))),
+      tps.map((t) => Number(t.size))
+    );
+    for (let i = 0; i < tps.length; i++) {
+      const contracts = sliced[i];
+      if (contracts == null) continue;
       const id = await send({
         ...base,
         ordType: "conditional",
         sz: contracts.toFixed(lotDec),
-        tpTriggerPx: tp.price.toFixed(dec),
+        tpTriggerPx: tps[i].price.toFixed(dec),
         tpOrdPx: "-1",
       });
       if (id) ids.push(id);

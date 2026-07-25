@@ -289,3 +289,95 @@ describe("okx protective-order bookkeeping must not guess", () => {
     expect(tp).toMatchObject({ kind: "tp", trigger: 62042.9, size: "2" });
   });
 });
+
+/** An instrument whose lot step makes an even split impossible: 1 contract =
+ *  10 coins, whole contracts only - the ADA-USDT-SWAP shape. */
+function stubChunky(captured: any[]) {
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+    const body = init?.body ? JSON.parse(init.body) : null;
+    let data: any[] = [];
+    if (url.includes("/account/config")) {
+      data = [{ posMode: "net_mode" }];
+    } else if (url.includes("/public/instruments")) {
+      data = [{
+        instId: "ADA-USDT-SWAP", ctVal: "10", lotSz: "1",
+        minSz: "1", tickSz: "0.0001",
+      }];
+    } else if (url.includes("/trade/order")) {
+      captured.push({ url, body });
+      data = [{ ordId: "OID-1", algoId: "ALGO-1", sCode: "0", sMsg: "" }];
+    }
+    return { ok: true, status: 200, json: async () => ({ code: "0", msg: "", data }) };
+  }));
+}
+
+describe("okx take-profit slices close the whole position", () => {
+  // 3070 ADA = 307 contracts. Halved, each slice is 153.5 -> floors to 153, and
+  // 153 + 153 leaves one contract that no target closes: a sliver that outlives
+  // the last take-profit, keeps the symbol "held", and ends up without a stop.
+  it("gives the lot-step remainder to the final attached target", async () => {
+    const captured: any[] = [];
+    stubChunky(captured);
+    const c = new OkxClient("k", "s", "p");
+    await c.placeOrder({
+      symbol: "ADA-USDT-SWAP", side: "SELL", type: "LIMIT",
+      size: "3070", price: "0.1628",
+      attach: {
+        stopLoss: 0.1638,
+        takeProfits: [
+          { price: 0.1609, size: "1535" },
+          { price: 0.158, size: "1535" },
+        ],
+      },
+    });
+    const attach = captured[0].body.attachAlgoOrds;
+    expect(captured[0].body.sz).toBe("307");
+    const tps = attach.filter((a: any) => a.tpTriggerPx);
+    expect(tps.map((t: any) => t.sz)).toEqual(["153", "154"]);
+    // the whole point: the targets add up to the order
+    expect(tps.reduce((a: number, t: any) => a + Number(t.sz), 0)).toBe(307);
+    // and the stop is still its own entry, covering everything (no sz)
+    expect(attach.filter((a: any) => a.slTriggerPx)).toEqual([
+      { slTriggerPx: "0.1638", slOrdPx: "-1" },
+    ]);
+  });
+
+  it("does the same for separately placed protective orders", async () => {
+    const captured: any[] = [];
+    stubChunky(captured);
+    const c = new OkxClient("k", "s", "p");
+    await c.placeStopOrders({
+      symbol: "ADA-USDT-SWAP", side: "BUY", size: "3070",
+      stopLoss: 0.1638,
+      takeProfits: [
+        { price: 0.1609, size: "1535" },
+        { price: 0.158, size: "1535" },
+      ],
+    });
+    const algos = captured
+      .filter((c) => c.url.includes("/trade/order-algo"))
+      .map((c) => c.body);
+    const tps = algos.filter((b: any) => b.tpTriggerPx);
+    expect(tps.map((b: any) => b.sz)).toEqual(["153", "154"]);
+    // the stop covers the full position, so a partial fill is still protected
+    expect(algos.find((b: any) => b.slTriggerPx)?.sz).toBe("307");
+  });
+
+  it("skips a target too small for the venue and lets the next one absorb it", async () => {
+    const captured: any[] = [];
+    stubChunky(captured);
+    const c = new OkxClient("k", "s", "p");
+    await c.placeOrder({
+      symbol: "ADA-USDT-SWAP", side: "SELL", type: "MARKET", size: "100",
+      attach: {
+        takeProfits: [
+          { price: 0.16, size: "5" },   // 0.5 contracts - below minSz
+          { price: 0.15, size: "95" },
+        ],
+      },
+    });
+    const tps = captured[0].body.attachAlgoOrds.filter((a: any) => a.tpTriggerPx);
+    expect(tps).toHaveLength(1);
+    expect(tps[0].sz).toBe("10");       // the whole 10-contract order
+  });
+});
