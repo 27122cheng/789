@@ -171,6 +171,11 @@ export interface Settings {
       //   "lift" - raise the order to the minimum (trades, but risks more)
       //   "skip" - drop the signal (never exceeds the configured size)
       belowMinSize: "lift" | "skip";
+      // Rest the stop-loss / first take-profit on the EXCHANGE as well, so a
+      // position stays protected if this app, Vercel or the cron stops. The
+      // monitor still runs and handles the parts an exchange stop cannot
+      // express (split TPs, R-multiples, trailing).
+      exchangeStops: boolean;
       entryType: "market" | "limit";
       attachStopLoss: boolean;
       attachTakeProfit: boolean;
@@ -244,6 +249,7 @@ export const DEFAULT_SETTINGS: Settings = {
     },
     orders: {
       belowMinSize: "lift",
+      exchangeStops: true,
       entryType: "market",
       attachStopLoss: true,
       attachTakeProfit: true,

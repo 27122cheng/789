@@ -268,6 +268,8 @@ describe("dry-run pipeline", () => {
         data = [{ last: "3000" }];
       } else if (url.includes("/account/set-leverage")) {
         data = [{ lever: "10" }];
+      } else if (url.includes("algo")) {
+        data = [];
       } else if (url.includes("/trade/order")) {
         orders.push(body);
         data = [{ ordId: "OKX-1", sCode: "0" }];
@@ -605,6 +607,7 @@ describe("minimum order size policy", () => {
       else if (url.includes("/public/instruments")) {
         data = [{ instId: "BTC-USDT-SWAP", ctVal: "0.01", lotSz: "0.01", minSz: "0.01", tickSz: "0.1" }];
       } else if (url.includes("/market/ticker")) data = [{ last: "60000" }];
+      else if (url.includes("algo")) data = [];
       else if (url.includes("/trade/order")) { orders.push(body); data = [{ ordId: "M-1", sCode: "0" }]; }
       return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
     }));
@@ -656,6 +659,7 @@ describe("size step rounding", () => {
       else if (url.includes("/public/instruments")) {
         data = [{ instId: "AVAX-USDT-SWAP", ctVal: "0.01", lotSz: "0.01", minSz: "0.01", tickSz: "0.1" }];
       } else if (url.includes("/market/ticker")) data = [{ last: "64000" }];
+      else if (url.includes("algo")) data = [];
       else if (url.includes("/trade/order")) { orders.push(body); data = [{ ordId: "S-1", sCode: "0" }]; }
       return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
     }));
@@ -666,5 +670,56 @@ describe("size step rounding", () => {
     const rec = (await getOrders()).find((o) => o.symbol === "AVAXUSDT" && o.success);
     expect(rec!.message).toContain("向下對齊");
     expect(rec!.message).toContain("6.40");   // real notional, not the configured 10
+  });
+});
+
+describe("exchange-side stops", () => {
+  it("rests SL/TP on OKX after the entry fills, and cancels them on close", async () => {
+    const cfg = settings();
+    cfg.exchange = "okx";
+    cfg.okx = {
+      apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false,
+    };
+    cfg.trading.liveTrading = true;
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.orders.entryType = "market";
+    cfg.trading.orders.exchangeStops = true;
+    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 600, percentBalance: 5 };
+
+    const algos: any[] = [];
+    const cancels: any[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any[] = [];
+      if (url.includes("/account/config")) data = [{ posMode: "net_mode" }];
+      else if (url.includes("/public/instruments")) {
+        data = [{ instId: "TRX-USDT-SWAP", ctVal: "0.1", lotSz: "0.1", minSz: "0.1", tickSz: "0.001" }];
+      } else if (url.includes("/market/ticker")) data = [{ last: "3000" }];
+      else if (url.includes("/orders-algo-pending")) data = algos.length ? [{ algoId: "A-1" }] : [];
+      else if (url.includes("/cancel-algos")) { cancels.push(body); data = [{ algoId: "A-1" }]; }
+      else if (url.includes("/order-algo")) { algos.push(body); data = [{ algoId: "A-1", sCode: "0" }]; }
+      else if (url.includes("/trade/order")) data = [{ ordId: "T-1", sCode: "0" }];
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+
+    await handleIncomingMessage(
+      "TRXUSDT LONG Entry: 3000 SL: 2900 TP1: 3100 TP2: 3200", meta(), cfg
+    );
+
+    // a protective OCO now sits on the exchange for this position
+    expect(algos).toHaveLength(1);
+    expect(algos[0].instId).toBe("TRX-USDT-SWAP");
+    expect(algos[0].ordType).toBe("oco");
+    expect(algos[0].side).toBe("sell");              // closing side of a long
+    expect(algos[0].slTriggerPx).toBe("2900.000");
+    expect(algos[0].tpTriggerPx).toBe("3100.000");   // first target
+    const rec = (await getOrders()).find((o) => o.symbol === "TRXUSDT" && o.success);
+    expect(rec!.message).toContain("交易所止盈止損已掛");
+
+    // closing the position clears the exchange stop too
+    await handleIncomingMessage("TRXUSDT 平倉", meta(), cfg);
+    expect((await getPositions())["TRXUSDT"]).toBeUndefined();
+    expect(cancels.length).toBeGreaterThan(0);
   });
 });

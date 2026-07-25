@@ -90,7 +90,8 @@ export class OkxClient implements ExchangeClient {
     method: string,
     path: string,
     query: Record<string, string> = {},
-    body?: Record<string, unknown>
+    // cancel-algos takes a JSON array body; everything else an object
+    body?: Record<string, unknown> | unknown[]
   ): Promise<any[]> {
     const qs = Object.keys(query)
       .map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(query[k])}`)
@@ -320,6 +321,80 @@ export class OkxClient implements ExchangeClient {
     if (!Number.isFinite(ctVal) || ctVal <= 0) return null;
     const base = String(info.instId).split("-")[0];
     return `${this.szFromBase(info, baseQty)} 張（每張 ${info.ctVal} ${base}）`;
+  }
+
+  /**
+   * Rest a protective TP/SL on the exchange as an algo order, so the position
+   * is closed by OKX itself even if this app is down. `ordType: "oco"` carries
+   * both legs and cancels the other when one triggers; with only one level set
+   * a plain "conditional" order is used. An order price of -1 means "close at
+   * market when triggered", which is what a protective stop wants.
+   */
+  async placeStopOrders(opts: {
+    symbol: string;
+    side: "BUY" | "SELL";
+    size: string;
+    stopLoss?: number | null;
+    takeProfit?: number | null;
+  }): Promise<string[]> {
+    const hasSl = opts.stopLoss != null && opts.stopLoss > 0;
+    const hasTp = opts.takeProfit != null && opts.takeProfit > 0;
+    if (!hasSl && !hasTp) return [];
+    const info = await this.infoFor(opts.symbol);
+    if (!info) throw new OkxApiError(`OKX 找不到合約 ${opts.symbol}`);
+
+    const dec = decimalsOf(info.tickSz) ?? 8;
+    const body: Record<string, unknown> = {
+      instId: opts.symbol,
+      tdMode: this.tdMode,
+      side: opts.side.toLowerCase(),
+      ordType: hasSl && hasTp ? "oco" : "conditional",
+      sz: this.szFromBase(info, Number(opts.size ?? 0)),
+    };
+    if (hasSl) {
+      body.slTriggerPx = opts.stopLoss!.toFixed(dec);
+      body.slOrdPx = "-1";           // market on trigger
+    }
+    if (hasTp) {
+      body.tpTriggerPx = opts.takeProfit!.toFixed(dec);
+      body.tpOrdPx = "-1";
+    }
+    // same position-mode rules as a normal order: these always REDUCE
+    if ((await this.posMode()) === "long_short_mode") {
+      body.posSide = opts.side === "SELL" ? "long" : "short";
+    } else {
+      body.reduceOnly = true;
+    }
+
+    const rows = await this.request("POST", "/api/v5/trade/order-algo", {}, body);
+    const first = rows[0] ?? {};
+    if (first.sCode !== undefined && String(first.sCode) !== "0") {
+      throw new OkxApiError(`OKX API error (${first.sCode}): ${first.sMsg ?? ""}`, String(first.sCode), first);
+    }
+    return first.algoId ? [String(first.algoId)] : [];
+  }
+
+  /** Pending algo (TP/SL) orders for a symbol. */
+  private async getAlgoOrders(instId: string): Promise<any[]> {
+    const out: any[] = [];
+    for (const ordType of ["oco", "conditional"]) {
+      const rows = await this.request("GET", "/api/v5/trade/orders-algo-pending", {
+        instId, ordType,
+      }).catch(() => []);
+      out.push(...rows);
+    }
+    return out;
+  }
+
+  async cancelStopOrders(instId: string): Promise<number> {
+    const orders = await this.getAlgoOrders(instId).catch(() => []);
+    const ids = orders
+      .map((o: any) => String(o.algoId ?? ""))
+      .filter(Boolean)
+      .map((algoId) => ({ algoId, instId }));
+    if (!ids.length) return 0;
+    await this.request("POST", "/api/v5/trade/cancel-algos", {}, ids).catch(() => {});
+    return ids.length;
   }
 
   async cancelOrder(instId: string, orderId: string): Promise<unknown> {

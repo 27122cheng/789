@@ -175,3 +175,60 @@ describe("okx order-size description", () => {
     expect(await c.describeOrderSize("BTCUSDT", 0.5)).toBe("50.0 張（每張 0.01 BTC）");
   });
 });
+
+describe("okx exchange-side stops", () => {
+  it("places an OCO with market-on-trigger legs, sized in contracts", async () => {
+    const captured: any[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any[] = [];
+      if (url.includes("/account/config")) data = [{ posMode: "net_mode" }];
+      else if (url.includes("/public/instruments")) {
+        data = [{ instId: "BTC-USDT-SWAP", ctVal: "0.01", lotSz: "0.01", minSz: "0.01", tickSz: "0.1" }];
+      } else if (url.includes("/order-algo")) {
+        captured.push(body);
+        data = [{ algoId: "A-1", sCode: "0" }];
+      }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+    const c = new OkxClient("k", "s", "p");
+    const ids = await c.placeStopOrders({
+      symbol: "BTC-USDT-SWAP", side: "SELL", size: "0.5",
+      stopLoss: 59000, takeProfit: 65000,
+    });
+    expect(ids).toEqual(["A-1"]);
+    expect(captured[0].ordType).toBe("oco");
+    expect(captured[0].sz).toBe("50.00");        // 0.5 BTC -> 50 contracts
+    expect(captured[0].slTriggerPx).toBe("59000.0");
+    expect(captured[0].tpTriggerPx).toBe("65000.0");
+    expect(captured[0].slOrdPx).toBe("-1");      // close at market on trigger
+    expect(captured[0].tpOrdPx).toBe("-1");
+    expect(captured[0].reduceOnly).toBe(true);
+    expect(captured[0].side).toBe("sell");
+  });
+
+  it("uses a single conditional order when only a stop-loss is set", async () => {
+    const captured: any[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any[] = [];
+      if (url.includes("/account/config")) data = [{ posMode: "long_short_mode" }];
+      else if (url.includes("/public/instruments")) {
+        data = [{ instId: "BTC-USDT-SWAP", ctVal: "0.01", lotSz: "0.01", minSz: "0.01", tickSz: "0.1" }];
+      } else if (url.includes("/order-algo")) { captured.push(body); data = [{ algoId: "A-2", sCode: "0" }]; }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+    const c = new OkxClient("k", "s", "p");
+    await c.placeStopOrders({ symbol: "BTC-USDT-SWAP", side: "BUY", size: "0.5", stopLoss: 70000 });
+    expect(captured[0].ordType).toBe("conditional");
+    expect(captured[0].tpTriggerPx).toBeUndefined();
+    // buying to close a short targets posSide=short, and no reduceOnly in hedge mode
+    expect(captured[0].posSide).toBe("short");
+    expect(captured[0].reduceOnly).toBeUndefined();
+  });
+
+  it("does nothing when neither level is set", async () => {
+    const c = new OkxClient("k", "s", "p");
+    expect(await c.placeStopOrders({ symbol: "BTC-USDT-SWAP", side: "SELL", size: "1" })).toEqual([]);
+  });
+});

@@ -53,4 +53,16 @@ export interface ExchangeClient {
   /** Human description of how a base quantity maps to the venue's own order
    *  unit (OKX sells contracts, not coins), for the sizing preview. */
   describeOrderSize?(symbol: string, baseQty: number): Promise<string | null>;
+
+  /** Rest protective stop-loss / take-profit orders ON THE EXCHANGE, so the
+   *  position stays protected even if this app stops running. Venues without
+   *  support simply omit these and rely on the monitor. */
+  placeStopOrders?(opts: {
+    symbol: string;                  // venue symbol
+    side: "BUY" | "SELL";            // the CLOSING side
+    size: string;                    // base-asset quantity to protect
+    stopLoss?: number | null;
+    takeProfit?: number | null;
+  }): Promise<string[]>;
+  cancelStopOrders?(venueSymbol: string): Promise<number>;
 }

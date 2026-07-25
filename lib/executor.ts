@@ -343,6 +343,45 @@ async function placeEntry(
   };
 }
 
+/**
+ * Mirror the position's stop-loss / first take-profit onto the exchange as
+ * resting orders, so it is protected even if this app stops running.
+ *
+ * Cancel-and-replace, because the levels and the remaining size both move
+ * (trailing, breakeven, partial take-profits). Failures are reported but never
+ * abort the trade: the monitor remains the working stop, the exchange order is
+ * a safety net on top of it.
+ */
+async function syncExchangeStops(
+  client: ExchangeClient,
+  settings: Settings,
+  live: boolean,
+  pos: Position
+): Promise<string | null> {
+  if (!settings.trading.orders.exchangeStops) return null;
+  if (!live || pos.dryRun) return null;
+  if (!client.placeStopOrders || !client.cancelStopOrders) return null;
+
+  const venue = client.perpSymbol(pos.symbol);
+  try {
+    await client.cancelStopOrders(venue);
+    if (pos.qty <= 0) return null;
+    const sl = pos.stopLoss;
+    const tp = pos.takeProfits[0] ?? null;
+    if (sl == null && tp == null) return null;
+    const ids = await client.placeStopOrders({
+      symbol: venue,
+      side: pos.side === "long" ? "SELL" : "BUY", // closing side
+      size: String(pos.qty),
+      stopLoss: sl,
+      takeProfit: tp,
+    });
+    return `交易所止盈止損已掛（SL ${sl ?? "-"} / TP ${tp ?? "-"}${ids.length ? `, id ${ids[0]}` : ""}）`;
+  } catch (err) {
+    return `⚠️ 交易所止盈止損掛單失敗：${(err as Error).message}（本系統監控仍會執行）`;
+  }
+}
+
 async function closeQty(
   client: ExchangeClient,
   live: boolean,
@@ -439,6 +478,7 @@ export async function executeSignal(
       .slice(0, Math.max(0, maxAdds - pos.addCount))
       .map((level) => ({ level, armedAt: null, armed: false }));
     await savePositions(positions);
+    await syncExchangeStops(client, settings, live, pos);
     await record("upgrade",
       { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: pos.qty, price: aligned.stopLoss, leverage: pos.leverage },
       live, true,
@@ -580,9 +620,10 @@ export async function executeSignal(
         };
         await savePositions(positions);
         await setCooldown(sym, Date.now());
+        const stopNote = await syncExchangeStops(client, settings, live, positions[sym]);
         await record("open",
           { symbol: sym, side: signal.side, sizeUsdt, qty: res.qty, price: res.price, leverage },
-          live, true, res.note, res.orderIds);
+          live, true, res.note + (stopNote ? `；${stopNote}` : ""), res.orderIds);
         return;
       }
 
@@ -603,9 +644,12 @@ export async function executeSignal(
         if (signal.stopLoss) p.stopLoss = signal.stopLoss;
         await savePositions(positions);
         await setCooldown(sym, Date.now());
+        const addStopNote = await syncExchangeStops(client, settings, live, p);
         await record("add",
           { symbol: sym, side: p.side, sizeUsdt, qty: res.qty, price: res.price, leverage: p.leverage },
-          live && !p.dryRun, true, `added to position (${p.addCount}x); ${res.note}`, res.orderIds);
+          live && !p.dryRun, true,
+          `added to position (${p.addCount}x); ${res.note}` + (addStopNote ? `；${addStopNote}` : ""),
+          res.orderIds);
         return;
       }
 
@@ -614,6 +658,9 @@ export async function executeSignal(
           return; // close signal for a symbol we don't hold - ignore silently
         }
         const ids = await closeQty(client, live, pos, pos.qty);
+        if (live && !pos.dryRun && client.cancelStopOrders) {
+          await client.cancelStopOrders(client.perpSymbol(sym)).catch(() => {});
+        }
         delete positions[sym];
         await savePositions(positions);
         await record("close",
@@ -627,7 +674,12 @@ export async function executeSignal(
         // Silent background handling: cancel exchange orders / drop or close
         // the tracked position, purge the trade's earlier signal & order
         // records, and record nothing new.
-        if (live) await client.cancelAllOrders(client.perpSymbol(sym));
+        if (live) {
+          await client.cancelAllOrders(client.perpSymbol(sym));
+          if (client.cancelStopOrders) {
+            await client.cancelStopOrders(client.perpSymbol(sym)).catch(() => {});
+          }
+        }
         if (pos) {
           // Anything actually filled must be exited - including a limit entry
           // that already got filled (qty > 0); only an unfilled pending order
@@ -656,9 +708,12 @@ export async function executeSignal(
         const old = pos.stopLoss;
         pos.stopLoss = newSl;
         await savePositions(positions);
+        const slStopNote = await syncExchangeStops(client, settings, live, pos);
         await record("update_sl",
           { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: pos.qty, price: newSl, leverage: pos.leverage },
-          live, true, `stop-loss moved ${old ?? "none"} -> ${newSl}${signal.stopLossBreakeven ? " (breakeven)" : ""}`);
+          live, true,
+          `stop-loss moved ${old ?? "none"} -> ${newSl}${signal.stopLossBreakeven ? " (breakeven)" : ""}` +
+            (slStopNote ? `；${slStopNote}` : ""));
         return;
       }
 
@@ -676,9 +731,11 @@ export async function executeSignal(
           pos.side === "long" ? a - b : b - a);
         pos.tpCountOriginal = Math.max(pos.tpCountOriginal, pos.takeProfits.length);
         await savePositions(positions);
+        const tpStopNote = await syncExchangeStops(client, settings, live, pos);
         await record("update_tp",
           { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: pos.qty, price: pos.takeProfits[0], leverage: pos.leverage },
-          live, true, `take-profits set to ${pos.takeProfits.join("/")}`);
+          live, true,
+          `take-profits set to ${pos.takeProfits.join("/")}` + (tpStopNote ? `；${tpStopNote}` : ""));
         return;
       }
     }
@@ -759,6 +816,8 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
         pos.pendingEntry = null;
         changed = true;
         actions.push(`${sym}: 限價單已成交 @ ${target}`);
+        const filledStopNote = await syncExchangeStops(client, settings, live, pos);
+        if (filledStopNote) actions.push(`${sym}: ${filledStopNote}`);
         await record("open",
           { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: pos.qty, price: target, leverage: pos.leverage },
           live && !pos.dryRun, true, `限價單成交 @ ${target}`, oid ? [String(oid)] : []);
@@ -792,6 +851,8 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
         pos.pendingEntry = null;
         changed = true;
         actions.push(`${sym}: 到價進場 @ ${target}（現價 ${price}）`);
+        const entryStopNote = await syncExchangeStops(client, settings, live, pos);
+        if (entryStopNote) actions.push(`${sym}: ${entryStopNote}`);
         await record("open",
           { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: res.qty, price: res.price, leverage: pos.leverage },
           live && !pos.dryRun, true, `到價進場 @ ${target}（現價 ${price}）`, res.orderIds);
@@ -811,6 +872,9 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
       continue; // just entered (or failed) - don't run SL/TP this tick
     }
     const dir = pos.side === "long" ? 1 : -1;
+    // set when a partial close shrinks the position, so the exchange stop can
+    // be re-placed for the remaining size before this tick ends
+    let sizeShrunk = false;
 
     // trailing stop: once profit exceeds the activation threshold, keep the
     // SL at callbackPercent behind the best price seen (ratchet only).
@@ -830,6 +894,7 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
           pos.stopLoss = candidate;
           changed = true;
           actions.push(`${sym}: trailing SL ${old?.toFixed(6) ?? "none"} -> ${candidate.toFixed(6)}`);
+          await syncExchangeStops(client, settings, live, pos);
           await record("trailing_move",
             { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: pos.qty, price: candidate, leverage: pos.leverage },
             live && !pos.dryRun, true, `trailing stop moved to ${candidate.toFixed(6)} (price ${price})`);
@@ -922,6 +987,7 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
           pos.qty -= qtyToClose;
           t.done = true;
           changed = true;
+          sizeShrunk = true;
           actions.push(`${sym}: ${t.r}R 達標，平 ${t.closePercent}% (${qtyToClose.toFixed(6)})`);
           await record("tp_hit",
             { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: qtyToClose, price, leverage: pos.leverage },
@@ -943,6 +1009,9 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
     if (pos.stopLoss != null && (price - pos.stopLoss) * dir <= 0) {
       try {
         const ids = await closeQty(client, live, pos, pos.qty);
+        if (live && !pos.dryRun && client.cancelStopOrders) {
+          await client.cancelStopOrders(client.perpSymbol(sym)).catch(() => {});
+        }
         delete positions[sym];
         changed = true;
         actions.push(`${sym}: SL hit at ${price}, position closed`);
@@ -972,6 +1041,7 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
         const ids = await closeQty(client, live, pos, qtyToClose);
         pos.qty -= qtyToClose;
         changed = true;
+        sizeShrunk = true;
         actions.push(`${sym}: TP ${target} hit at ${price}, closed ${qtyToClose.toFixed(6)}`);
         await record("tp_hit",
           { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: qtyToClose, price, leverage: pos.leverage },
@@ -993,6 +1063,7 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
             const old = pos.stopLoss;
             pos.stopLoss = newSl;
             actions.push(`${sym}: TP1 hit -> SL moved to breakeven zone ${newSl.toFixed(6)}`);
+            await syncExchangeStops(client, settings, live, pos);
             await record("trailing_move",
               { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: pos.qty, price: newSl, leverage: pos.leverage },
               live && !pos.dryRun, true,
@@ -1008,6 +1079,16 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
         delete positions[sym];
         actions.push(`${sym}: all targets filled, position fully closed`);
         break;
+      }
+    }
+
+    if (sizeShrunk) {
+      if (positions[sym]) {
+        // remaining size changed -> re-place the exchange stop to match
+        const note = await syncExchangeStops(client, settings, live, pos);
+        if (note) actions.push(`${sym}: ${note}`);
+      } else if (live && !pos.dryRun && client.cancelStopOrders) {
+        await client.cancelStopOrders(client.perpSymbol(sym)).catch(() => {});
       }
     }
   }

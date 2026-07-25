@@ -40,6 +40,7 @@ export default function SettingsPage() {
   const [maxAge, setMaxAge] = useState(120);
   const [entryType, setEntryType] = useState("market");
   const [belowMinSize, setBelowMinSize] = useState("lift");
+  const [exchangeStops, setExchangeStops] = useState(true);
   const [attachSl, setAttachSl] = useState(true);
   const [attachTp, setAttachTp] = useState(true);
   const [splitTp, setSplitTp] = useState(true);
@@ -92,6 +93,7 @@ export default function SettingsPage() {
     setMaxAge(s.trading.risk.maxSignalAgeSeconds);
     setEntryType(s.trading.orders.entryType);
     setBelowMinSize(s.trading.orders.belowMinSize ?? "lift");
+    setExchangeStops(s.trading.orders.exchangeStops !== false);
     setAttachSl(!!s.trading.orders.attachStopLoss);
     setAttachTp(!!s.trading.orders.attachTakeProfit);
     setSplitTp(s.trading.orders.splitTakeProfit !== false);
@@ -154,6 +156,7 @@ export default function SettingsPage() {
           orders: {
             entryType,
             belowMinSize,
+            exchangeStops,
             attachStopLoss: attachSl,
             attachTakeProfit: attachTp,
             splitTakeProfit: splitTp,
@@ -380,6 +383,11 @@ export default function SettingsPage() {
             </p>
           </div>
           <div style={{ display: "flex", alignItems: "flex-end", gap: 16 }}>
+            <div className="checkbox">
+              <input type="checkbox" id="exstops" checked={exchangeStops}
+                     onChange={(e) => setExchangeStops(e.target.checked)} />
+              <label htmlFor="exstops" style={{ margin: 0 }}>把止盈止損掛到交易所</label>
+            </div>
             <div className="checkbox">
               <input type="checkbox" id="asl" checked={attachSl}
                      onChange={(e) => setAttachSl(e.target.checked)} />
