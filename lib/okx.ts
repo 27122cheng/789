@@ -309,6 +309,51 @@ export class OkxClient implements ExchangeClient {
     return out;
   }
 
+  /**
+   * Positions the exchange has already closed, with ITS OWN realised PnL.
+   *
+   * When a stop or take-profit fires on the exchange we never see the fill, so
+   * PnL could only be estimated from the trigger price - which ignores slippage,
+   * gaps and fees. OKX reports realizedPnl net of fee and funding, so the
+   * performance numbers can be the exchange's rather than our guess.
+   */
+  async fetchClosedPositions(): Promise<
+    {
+      symbol: string;
+      side: "long" | "short";
+      openPrice: number;
+      closePrice: number;
+      realizedPnl: number;
+      qty: number;
+      closedAt: number;
+    }[]
+  > {
+    const rows = await this.request("GET", "/api/v5/account/positions-history", {
+      instType: "SWAP",
+      limit: "50",
+    });
+    const out: any[] = [];
+    for (const r of rows) {
+      if (!r?.instId) continue;
+      const info = await this.infoFor(String(r.instId));
+      const ctVal = Number(info?.ctVal);
+      const contracts = Number(r.closeTotalPos ?? r.openMaxPos ?? 0);
+      out.push({
+        symbol: String(r.instId),
+        side: r.direction === "short" || r.posSide === "short" ? "short" : "long",
+        openPrice: Number(r.openAvgPx) || 0,
+        closePrice: Number(r.closeAvgPx) || 0,
+        realizedPnl: Number(r.realizedPnl) || 0,
+        qty:
+          Number.isFinite(contracts) && Number.isFinite(ctVal) && ctVal > 0
+            ? Math.abs(contracts) * ctVal
+            : 0,
+        closedAt: Number(r.uTime) || Date.now(),
+      });
+    }
+    return out;
+  }
+
   async setLeverage(instId: string, leverage: number): Promise<void> {
     await this.request("POST", "/api/v5/account/set-leverage", {}, {
       instId, lever: String(leverage), mgnMode: this.tdMode,

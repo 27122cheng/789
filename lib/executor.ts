@@ -582,12 +582,15 @@ function bookClose(pos: Position, qty: number, exitPrice: number): number {
 async function finishTrade(
   pos: Position,
   exitPrice: number,
-  reason: string
+  reason: string,
+  // the venue's own realised PnL, net of fees and funding. Preferred over our
+  // own arithmetic whenever available: it is what actually hit the account.
+  exchangePnl?: number | null
 ): Promise<void> {
   const qty = pos.closedQty ?? 0;
   if (qty <= 0) return;   // nothing was ever closed - not a completed trade
   const margin = pos.leverage > 0 ? pos.sizeUsdt / pos.leverage : pos.sizeUsdt;
-  const pnl = pos.realizedPnl ?? 0;
+  const pnl = exchangePnl != null ? exchangePnl : pos.realizedPnl ?? 0;
   await appendTrade({
     symbol: pos.symbol,
     side: pos.side,
@@ -605,7 +608,7 @@ async function finishTrade(
     addCount: pos.addCount,
     openedAt: pos.openedAt,
     closedAt: Date.now(),
-    reason,
+    reason: exchangePnl != null ? `${reason}（交易所結算）` : reason,
     dryRun: pos.dryRun,
   });
 }
@@ -1449,11 +1452,21 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
             await client.cancelStopOrders(venue).catch(() => {});
           }
           await client.cancelAllOrders(venue).catch(() => {});
-          // the exchange executed it, so the exit price is unknown precisely;
-          // the stop is the best available estimate of where it went out
-          const exit = pos.stopLoss ?? price;
+          // The exchange executed the close, so read ITS result rather than
+          // estimating from the trigger price - that would miss slippage, gaps
+          // and fees. Falls back to the stop as an estimate if unavailable.
+          const closed = client.fetchClosedPositions
+            ? (await client.fetchClosedPositions().catch(() => []))
+                .filter(
+                  (c) =>
+                    c.symbol === client.perpSymbol(sym) &&
+                    c.closedAt >= pos.openedAt - 60_000
+                )
+                .sort((a, b) => b.closedAt - a.closedAt)[0]
+            : undefined;
+          const exit = closed?.closePrice || pos.stopLoss || price;
           bookClose(pos, pos.qty, exit);
-          await finishTrade(pos, exit, "exchange");
+          await finishTrade(pos, exit, "exchange", closed?.realizedPnl ?? null);
           delete positions[sym];
           changed = true;
           actions.push(`${sym}: 交易所已無持倉（止損或平倉已執行）→ 同步移除追蹤`);

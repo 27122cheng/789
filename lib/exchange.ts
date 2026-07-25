@@ -106,4 +106,19 @@ export interface ExchangeClient {
   fetchPositions?(): Promise<
     { symbol: string; side: "long" | "short"; qty: number; entryPrice: number }[]
   >;
+
+  /** Positions the venue has already closed, with its own realised PnL. When a
+   *  stop fires on the exchange the fill is never seen here, so this is the only
+   *  way to record the true result instead of estimating from the trigger. */
+  fetchClosedPositions?(): Promise<
+    {
+      symbol: string;
+      side: "long" | "short";
+      openPrice: number;
+      closePrice: number;
+      realizedPnl: number;
+      qty: number;
+      closedAt: number;
+    }[]
+  >;
 }

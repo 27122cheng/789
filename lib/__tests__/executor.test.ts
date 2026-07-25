@@ -1856,3 +1856,55 @@ describe("the whole take-profit plan rides on the entry order", () => {
     expect(tps[0].sz).toBeUndefined();   // a lone target covers the whole order
   });
 });
+
+describe("PnL for a close the exchange executed", () => {
+  it("takes the exchange's realised PnL rather than estimating from the stop", async () => {
+    const cfg = settings();
+    cfg.exchange = "okx";
+    cfg.okx = { apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false };
+    cfg.trading.liveTrading = true;
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.risk.maxOpenPositions = 50;
+    cfg.trading.orders.entryType = "market";
+    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 1000, percentBalance: 5, basis: "notional" };
+
+    let held: any[] = [];
+    let history: any[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      let data: any[] = [];
+      if (url.includes("/account/config")) data = [{ posMode: "net_mode" }];
+      else if (url.includes("/public/instruments")) {
+        data = [{ instId: "GALA-USDT-SWAP", ctVal: "1", lotSz: "1", minSz: "1", tickSz: "0.01" }];
+      } else if (url.includes("/market/ticker")) data = [{ last: "100" }];
+      else if (url.includes("/positions-history")) data = history;
+      else if (url.includes("/account/positions")) data = held;
+      else if (url.includes("/orders-algo-pending")) data = [];
+      else if (url.includes("orders-pending")) data = [];
+      else if (url.includes("ordId=")) data = [{ state: "filled" }];
+      else if (url.includes("algo")) data = [{ algoId: "A-1", sCode: "0" }];
+      else if (url.includes("/trade/order")) data = [{ ordId: "G-1", sCode: "0" }];
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+
+    await handleIncomingMessage("GALAUSDT LONG Entry: 100 SL: 90 最終止盈: 150", meta(), cfg);
+    const pos = (await getPositions())["GALAUSDT"];
+    pos.openedAt = Date.now() - 10 * 60 * 1000;   // past the grace period
+    const all = await getPositions();
+    all["GALAUSDT"] = pos;
+    await savePositions(all);
+
+    // OKX closed it at 88.5 (slipped past the 90 stop) and reports -117.3 net
+    history = [{
+      instId: "GALA-USDT-SWAP", direction: "long", openAvgPx: "100",
+      closeAvgPx: "88.5", realizedPnl: "-117.3", closeTotalPos: "10",
+      uTime: String(Date.now()),
+    }];
+    await monitorTick(cfg);
+
+    const t = (await getTrades()).find((x) => x.symbol === "GALAUSDT")!;
+    expect(t.exitPrice).toBe(88.5);          // the real fill, not the 90 stop
+    expect(t.pnlUsdt).toBe(-117.3);          // the exchange's own number
+    expect(t.reason).toContain("交易所結算");
+  });
+});
