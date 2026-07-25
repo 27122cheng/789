@@ -880,9 +880,9 @@ export async function executeSignal(
         }
 
         // entryType "limit" + a target the market hasn't reached yet: rest a
-        // REAL limit order on Pionex at the signal's entry price so it fills at
-        // exactly that price. If Pionex rejects it (price band / filters), fall
-        // back to 到價進場 - the monitor market-enters when price arrives.
+        // REAL limit order at the signal's entry price so it fills at exactly
+        // that price. If the venue rejects it, the trade is skipped by default -
+        // see orders.limitRejected.
         if (entryType === "limit" && aligned.entry != null && refPrice != null) {
           const dir: "up" | "down" = refPrice >= aligned.entry ? "down" : "up";
           const reached = dir === "down" ? refPrice <= aligned.entry : refPrice >= aligned.entry;
@@ -917,16 +917,25 @@ export async function executeSignal(
                 note = `已在 ${venueName(settings)} 掛限價單 @ ${aligned.entry}（現價 ${refPrice}）`;
               } catch (err) {
                 const emsg = (err as Error).message;
-                // An account-level rejection will hit the market fallback too,
-                // so fail now instead of parking a position that cannot ever
-                // be filled.
-                if (isUnrecoverable(emsg)) {
+                // Watching the price ourselves is a much weaker substitute for a
+                // resting order - once-a-minute sampling, a market fill instead
+                // of the signal's price, and nothing at all while the monitor is
+                // down - so most of those trades never really enter. Skipping is
+                // the default, and account-level rejections skip regardless
+                // because the market fallback would fail identically.
+                if (
+                  (settings.trading.orders.limitRejected ?? "skip") === "skip" ||
+                  isUnrecoverable(emsg)
+                ) {
                   await record("open",
                     { symbol: sym, side: signal.side, sizeUsdt, qty: 0, price: aligned.entry, leverage },
-                    live, false, `${venueName(settings)} 拒絕下單：${emsg}${okxCodeHint(emsg) ?? permHint(settings)}`);
+                    live, false,
+                    `${venueName(settings)} 掛限價單被拒 @ ${aligned.entry}（現價 ${refPrice}）：` +
+                      `${emsg}${okxCodeHint(emsg) ?? (isUnrecoverable(emsg) ? permHint(settings) : "")}` +
+                      `→ 略過這筆，不進場`);
                   return;
                 }
-                // otherwise keep the trade alive: watch the price ourselves
+                // opted in to the fallback: keep the trade alive by watching
                 note =
                   `${venueName(settings)} 掛限價單被拒（${emsg}）` +
                   `→ 改用到價自動進場 @ ${aligned.entry}（現價 ${refPrice}）`;

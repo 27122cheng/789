@@ -246,6 +246,13 @@ export interface Settings {
       // express (split TPs, R-multiples, trailing).
       exchangeStops: boolean;
       entryType: "market" | "limit";
+      // What to do when the venue refuses the resting LIMIT entry:
+      //   "skip"  - drop the signal (the trade never happens)
+      //   "watch" - keep it and let the monitor market-enter when price arrives
+      // Watching is a poor substitute: it only samples the price once a minute,
+      // enters at market rather than at the signal's price, and does nothing at
+      // all if the monitor is down - so most of those trades never really enter.
+      limitRejected: "skip" | "watch";
       attachStopLoss: boolean;
       attachTakeProfit: boolean;
       // 分批止盈: close an equal share of the position at each TP target
@@ -335,6 +342,7 @@ export const DEFAULT_SETTINGS: Settings = {
       belowMinSize: "lift",
       exchangeStops: true,
       entryType: "market",
+      limitRejected: "skip",
       attachStopLoss: true,
       attachTakeProfit: true,
       splitTakeProfit: true,

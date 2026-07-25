@@ -209,6 +209,7 @@ describe("dry-run pipeline", () => {
     const cfg = settings();
     cfg.trading.risk.cooldownSeconds = 0;
     cfg.trading.orders.entryType = "limit";
+    cfg.trading.orders.limitRejected = "watch"; // opted out of the default skip
     cfg.trading.liveTrading = true;
     cfg.pionex.apiKey = "k";
     cfg.pionex.apiSecret = "s";
@@ -1999,5 +2000,66 @@ describe("rejections that no fallback can fix", () => {
     const rec = (await getOrders()).find((o) => o.symbol === "ATOMUSDT");
     expect(rec?.success).toBe(false);
     expect(rec?.message ?? "").not.toMatch(/沒有這個永續合約/);
+  });
+});
+
+describe("a limit entry the venue refuses", () => {
+  /** Pionex refusing the resting LIMIT order (its real price-filter case),
+   *  while MARKET orders would still go through. */
+  function stubLimitRefused() {
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any = {};
+      let result = true;
+      if (url.includes("/common/symbols")) {
+        data = { symbols: [{ symbol: "EOS_USDT_PERP", baseStep: "0.001", quoteStep: "0.0001" }] };
+      } else if (url.includes("/market/tickers")) {
+        data = { tickers: [{ close: "1.2" }] };
+      } else if (url.includes("/market/klines")) {
+        data = { klines: [{ time: Date.now(), high: 1.2, low: 0.9 }] };
+      } else if (url.includes("orders-pending")) data = [];
+      else if (url.includes("/trade/order")) {
+        if (body?.type === "LIMIT") result = false;
+        else data = { orderId: "OID-M" };
+      }
+      return {
+        ok: result, status: result ? 200 : 400,
+        json: async () => ({ result, code: "TRADE_PRICE_FILTER_DENIED", data }),
+      };
+    }));
+  }
+
+  function liveCfg(): Settings {
+    const cfg = settings();
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.risk.maxOpenPositions = 20;
+    cfg.trading.orders.entryType = "limit";
+    cfg.trading.liveTrading = true;
+    cfg.pionex.apiKey = "k";
+    cfg.pionex.apiSecret = "s";
+    return cfg;
+  }
+
+  it("is skipped by default rather than parked as 待進場", async () => {
+    stubLimitRefused();
+    const cfg = liveCfg();
+    await handleIncomingMessage(
+      "EOSUSDT LONG Entry: 1 SL: 0.9 TP1: 1.5", meta(), cfg
+    );
+    // no position at all - the slot stays free for a signal that can be placed
+    expect((await getPositions())["EOSUSDT"]).toBeUndefined();
+    const rec = (await getOrders()).find((o) => o.symbol === "EOSUSDT");
+    expect(rec?.success).toBe(false);
+    expect(rec?.message).toMatch(/略過這筆/);
+  });
+
+  it("still falls back to watching when that is explicitly chosen", async () => {
+    stubLimitRefused();
+    const cfg = liveCfg();
+    cfg.trading.orders.limitRejected = "watch";
+    await handleIncomingMessage(
+      "EOSUSDT LONG Entry: 1 SL: 0.9 TP1: 1.5", meta(), cfg
+    );
+    expect((await getPositions())["EOSUSDT"].pendingEntry!.mode).toBe("watch");
   });
 });

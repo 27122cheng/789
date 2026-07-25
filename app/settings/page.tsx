@@ -43,6 +43,7 @@ export default function SettingsPage() {
   const [maxAge, setMaxAge] = useState(120);
   const [entryType, setEntryType] = useState("market");
   const [belowMinSize, setBelowMinSize] = useState("lift");
+  const [limitRejected, setLimitRejected] = useState("skip");
   const [exchangeStops, setExchangeStops] = useState(true);
   const [attachSl, setAttachSl] = useState(true);
   const [attachTp, setAttachTp] = useState(true);
@@ -100,6 +101,7 @@ export default function SettingsPage() {
     setMaxAge(s.trading.risk.maxSignalAgeSeconds);
     setEntryType(s.trading.orders.entryType);
     setBelowMinSize(s.trading.orders.belowMinSize ?? "lift");
+    setLimitRejected(s.trading.orders.limitRejected ?? "skip");
     setExchangeStops(s.trading.orders.exchangeStops !== false);
     setAttachSl(!!s.trading.orders.attachStopLoss);
     setAttachTp(!!s.trading.orders.attachTakeProfit);
@@ -169,6 +171,7 @@ export default function SettingsPage() {
           orders: {
             entryType,
             belowMinSize,
+            limitRejected,
             exchangeStops,
             attachStopLoss: attachSl,
             attachTakeProfit: attachTp,
@@ -431,6 +434,17 @@ export default function SettingsPage() {
               「自行判斷加倉時機」= 用長線單的加倉計劃價位，自己盯價站穩後回踩市價加倉。
               若信號提供方已經自己做確認、會另外發「加倉確認｜請掛單」，
               請<b>保持關閉</b> —— 兩邊都動作會對同一個價位加倉兩次。
+            </p>
+            <label style={{ marginTop: 12 }}>掛限價單被交易所拒絕時</label>
+            <select value={limitRejected} onChange={(e) => setLimitRejected(e.target.value)}>
+              <option value="skip">略過這筆，不進場（建議）</option>
+              <option value="watch">自己盯價，到價用市價進場</option>
+            </select>
+            <p className="hint">
+              限價單掛不上去（保證金不足、價格帶、精度…）時要怎麼辦。
+              「自己盯價」是很弱的替代方案：每分鐘才看一次價格、用市價成交而不是信號的價格，
+              監控停掉時完全不會進場 —— 實際上大多進不去，還會佔著持倉名額。
+              帳號層級的拒絕（權限、保證金不足、幣種沒上架）一律直接略過，因為市價單也會被拒。
             </p>
             <label style={{ marginTop: 12 }}>金額低於交易所最低下單量時</label>
             <select value={belowMinSize} onChange={(e) => setBelowMinSize(e.target.value)}>
