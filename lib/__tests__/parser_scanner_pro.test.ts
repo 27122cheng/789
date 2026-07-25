@@ -196,10 +196,12 @@ describe("長線單 加倉確認 (tranche limit order)", () => {
     expect(sig!.symbol).toBe("BTCUSDT");
   });
 
-  it("uses the tranche's limit price and stop, not the main position's", () => {
+  it("uses the tranche's limit price, and the POSITION's stop", () => {
     const sig = parseSignal(msg, meta)!;
     expect(sig.entryPrice).toBe(103);      // 掛限價單於, not 主倉進場 100
-    expect(sig.stopLoss).toBe(101.5);      // 此筆止損, not 主倉止損 99
+    // an add runs on the position's stop, so 主倉止損 wins over 此筆止損 101.5 -
+    // a tighter tranche stop would let the added size be stopped out alone
+    expect(sig.stopLoss).toBe(99);
   });
 });
 
@@ -245,5 +247,30 @@ describe("完整加倉通知序列 (four message types)", () => {
     )!;
     expect(s.action).toBe("update_sl");
     expect(s.stopLoss).toBe(100.2);
+  });
+});
+
+describe("加倉確認 with one shared stop (current provider format)", () => {
+  it("takes the single quoted stop as the position's stop", () => {
+    const s = parseSignal(
+      `📌 加倉確認 #2｜請掛單 — ETH ▲ 做多
+🎯 掛限價單於：$3200
+🛑 止損（主倉與加倉相同）：$3100`,
+      meta
+    )!;
+    expect(s.action).toBe("add");
+    expect(s.entryPrice).toBe(3200);
+    expect(s.stopLoss).toBe(3100);
+  });
+
+  it("prefers 主倉止損 when the message still lists both", () => {
+    const s = parseSignal(
+      `📌 加倉確認 #2｜請掛單 — ETH ▲ 做多
+🎯 掛限價單於：$3200
+🛑 此筆止損：$3180
+📌 主倉止損：$3100`,
+      meta
+    )!;
+    expect(s.stopLoss).toBe(3100);
   });
 });

@@ -85,6 +85,15 @@ function extractAddLimit(norm: string): number | null {
   return m ? parseFloat(m[1]) : null;
 }
 
+/** 「主倉止損：$99」- the stop for the WHOLE position. Authoritative whenever the
+ *  message spells it out separately from a per-tranche number. */
+function extractMainStop(norm: string): number | null {
+  const m = norm.match(
+    /主(?:倉|仓)(?:止損|止损)[：:\s]*\$?\s*([0-9]*\.?[0-9]+)/
+  );
+  return m ? parseFloat(m[1]) : null;
+}
+
 /** The tranche's own stop:「此筆止損：$101.5」(NOT 主倉止損). */
 function extractTrancheStop(norm: string): number | null {
   const m = norm.match(
@@ -374,13 +383,22 @@ export function parseSignal(
   // An add tranche carries its OWN limit price and stop; the 主倉 numbers in the
   // same message describe the existing position and must not be used here.
   const addLimit = action === "add" ? extractAddLimit(norm) : null;
-  const trancheStop = action === "add" ? extractTrancheStop(norm) : null;
+  // An add runs on the position's stop. Prefer 主倉止損 when the message states
+  // it separately; otherwise the single stop it quotes IS the position's stop.
+  const addStop =
+    action === "add"
+      ? extractMainStop(norm) ??
+        extractTrancheStop(norm) ??
+        // loose: the label and the number can be separated by wording such as
+        // 「止損（主倉與加倉相同）：$3100」
+        extractStopLoss(norm, true)
+      : null;
 
   const stopLoss =
     action === "update_sl"
       ? extractStopLoss(norm, true)
       : action === "add"
-      ? trancheStop ?? strictSl
+      ? addStop
       : strictSl;
 
   return {

@@ -782,26 +782,30 @@ export async function executeSignal(
         // leave the MAIN stop alone - the signal says it moves later, under its
         // own notice; the stop quoted here belongs to this tranche only.
         if (signal.entryPrice != null && addLive) {
-          // Protect the tranche on the order itself, using the MAIN position's
-          // stop and first target - an add is meant to run on the same stop as
-          // the rest of the position. Attaching the tranche's own (tighter)
-          // stop instead would let the added size be stopped out on its own
-          // during the window before the fill is noticed, while the main
-          // position kept running. The tranche stop is recorded for reference;
-          // the position's stop moves for everything at once when the
-          // 加倉確認通知 (止損上移) arrives.
-          const trancheSl = p.stopLoss;
+          // The 請掛單 message quotes the stop that applies to the whole
+          // position, so adopt it - keeping a stale one would ignore a stop the
+          // provider has already moved. An add always runs on the position's
+          // stop, never a tighter one of its own: that would let the added size
+          // be stopped out alone while the rest kept running.
+          const alignedAdd = await alignPrices(client, sym, {
+            entry: signal.entryPrice,
+            stopLoss: signal.stopLoss,
+          });
+          const stopChanged =
+            alignedAdd.stopLoss != null && alignedAdd.stopLoss !== p.stopLoss;
+          if (alignedAdd.stopLoss != null) p.stopLoss = alignedAdd.stopLoss;
+          const addLevel = alignedAdd.entry ?? signal.entryPrice;
           const r = await placeEntry(
-            client, true, sym, p.side, sizeUsdt, "limit", signal.entryPrice, refPrice, p.leverage,
+            client, true, sym, p.side, sizeUsdt, "limit", addLevel, refPrice, p.leverage,
             settings.trading.orders.belowMinSize ?? "lift",
             settings.trading.orders.exchangeStops
-              ? { stopLoss: trancheSl, takeProfit: p.takeProfits[0] ?? null }
+              ? { stopLoss: p.stopLoss, takeProfit: p.takeProfits[0] ?? null }
               : undefined
           );
           p.pendingAdds = [
             ...(p.pendingAdds ?? []),
             {
-              level: signal.entryPrice,
+              level: addLevel,
               armedAt: Date.now(),
               armed: true,
               orderId: r.orderIds[0] ?? null,
@@ -813,15 +817,19 @@ export async function executeSignal(
           ];
           await savePositions(positions);
           await setCooldown(sym, Date.now());
+          // the size already held must follow the same stop
+          const addSyncNote = stopChanged
+            ? await syncExchangeStops(client, settings, live, p)
+            : null;
           await record("add",
-            { symbol: sym, side: p.side, sizeUsdt, qty: 0, price: signal.entryPrice, leverage: p.leverage },
+            { symbol: sym, side: p.side, sizeUsdt, qty: 0, price: addLevel, leverage: p.leverage },
             true, true,
-            `加倉確認：已掛限價單 @ ${signal.entryPrice}（回踩成交）` +
+            `加倉確認：已掛限價單 @ ${addLevel}（回踩成交）` +
               (r.attached
-                ? `，已附帶止損 ${trancheSl ?? "-"}／止盈 ${p.takeProfits[0] ?? "-"}（與主倉相同）`
+                ? `，已附帶止損 ${p.stopLoss ?? "-"}／止盈 ${p.takeProfits[0] ?? "-"}（與主倉相同）`
                 : "") +
-              (signal.stopLoss ? `；訊號的此筆止損 ${signal.stopLoss} 僅供參考` : "") +
-              "；主倉止損不變，等後續通知",
+              (stopChanged ? `；主倉止損同步更新為 ${p.stopLoss}` : "；主倉止損不變") +
+              (addSyncNote ? `；${addSyncNote}` : ""),
             r.orderIds);
           return;
         }
