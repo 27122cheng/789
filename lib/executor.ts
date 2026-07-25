@@ -1039,6 +1039,24 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
   let changed = false;
 
   const pendingTimeoutMs = 6 * 60 * 60 * 1000; // drop unfilled 到價進場 after 6h
+  // A fresh entry may not be visible on the exchange for a moment, so a
+  // position is only treated as closed once it has had time to register.
+  const closeGraceMs = 2 * 60 * 1000;
+
+  // Fetched at most once per tick and shared: the exchange is the authority on
+  // what is actually held, and asking per symbol would multiply API calls.
+  let realCache:
+    | { symbol: string; side: "long" | "short"; qty: number; entryPrice: number }[]
+    | null
+    | undefined;
+  const realPositions = async () => {
+    if (realCache === undefined) {
+      realCache = client.fetchPositions
+        ? await client.fetchPositions().catch(() => null)
+        : null;
+    }
+    return realCache;
+  };
 
   for (const sym of Object.keys(positions)) {
     const pos = positions[sym];
@@ -1054,8 +1072,9 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
     // is the source of truth, so adopt it and let this tick protect it.
     if (pos.pendingEntry && live && !pos.dryRun && client.fetchPositions) {
       const venue = client.perpSymbol(sym);
-      const real = (await client.fetchPositions().catch(() => []))
-        .find((p) => p.symbol === venue && p.qty > 0);
+      const real = ((await realPositions()) ?? []).find(
+        (p) => p.symbol === venue && p.qty > 0
+      );
       if (real) {
         const target = pos.pendingEntry.target;
         pos.entryPrice = real.entryPrice || target;
@@ -1165,6 +1184,39 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
     // set when a partial close shrinks the position, so the exchange stop can
     // be re-placed for the remaining size before this tick ends
     let sizeShrunk = false;
+
+    // The mirror of the fill reconciliation above: a stop firing on the
+    // exchange, a manual close or a liquidation all END the position without
+    // this app doing anything. Unnoticed, the tracker keeps a zombie position -
+    // the self-heal below re-places protective orders for it every single tick,
+    // and the orphan sweep skips them because the tracker still "holds" it.
+    if (
+      live && !pos.dryRun && !pos.pendingEntry && pos.qty > 0 &&
+      Date.now() - pos.openedAt > closeGraceMs
+    ) {
+      const real = await realPositions();
+      if (real) {
+        const stillOpen = real.some(
+          (p) => p.symbol === client.perpSymbol(sym) && p.qty > 0
+        );
+        if (!stillOpen) {
+          const venue = client.perpSymbol(sym);
+          if (client.cancelStopOrders) {
+            await client.cancelStopOrders(venue).catch(() => {});
+          }
+          await client.cancelAllOrders(venue).catch(() => {});
+          delete positions[sym];
+          changed = true;
+          actions.push(`${sym}: 交易所已無持倉（止損或平倉已執行）→ 同步移除追蹤`);
+          await record("close",
+            { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: pos.qty, price: price, leverage: pos.leverage },
+            true, true,
+            "交易所已無此持倉（止損或平倉已在交易所執行）→ 同步移除追蹤，" +
+              "並撤銷殘留的保護單與加倉掛單");
+          continue;
+        }
+      }
+    }
 
     // Self-heal: protective orders are otherwise only placed when something
     // happens (fill, SL change, partial close), so a position that was opened

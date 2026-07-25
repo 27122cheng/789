@@ -6,7 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleIncomingMessage, monitorTick } from "../executor";
-import { getOrders, getPositions, getSignals } from "../store";
+import { getOrders, getPositions, getSignals, savePositions } from "../store";
 import { DEFAULT_SETTINGS, Settings } from "../types";
 
 function settings(): Settings {
@@ -1486,6 +1486,66 @@ describe("orphaned protective orders", () => {
     expect(cancelled.every((c) => c.instId === "SNX-USDT-SWAP")).toBe(true);
     expect(actions.some((a) => a.includes("清理無持倉的殘留止盈止損單"))).toBe(true);
     const rec = (await getOrders()).find((o) => o.message.includes("清理殘留保護單"));
+    expect(rec).toBeDefined();
+  });
+});
+
+describe("a position stopped out on the exchange", () => {
+  it("stops re-placing protective orders and drops the zombie position", async () => {
+    const cfg = settings();
+    cfg.exchange = "okx";
+    cfg.okx = { apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false };
+    cfg.trading.liveTrading = true;
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.risk.maxOpenPositions = 50;
+    cfg.trading.orders.entryType = "market";
+    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 600, percentBalance: 5, basis: "notional" };
+
+    const algos: any[] = [];
+    const cancelled: any[] = [];
+    // nothing held at open time; the stop has already fired by the first tick
+    let held: any[] = [];
+    let algoPending: any[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any[] = [];
+      if (url.includes("/account/config")) data = [{ posMode: "net_mode" }];
+      else if (url.includes("/public/instruments")) {
+        data = [{ instId: "SNX-USDT-SWAP", ctVal: "0.1", lotSz: "0.1", minSz: "0.1", tickSz: "0.0001" }];
+      } else if (url.includes("/market/ticker")) data = [{ last: "0.21" }];
+      else if (url.includes("/account/positions")) data = held;
+      else if (url.includes("/cancel-algos")) { cancelled.push(...body); algoPending = []; data = body; }
+      else if (url.includes("/orders-algo-pending")) data = algoPending;
+      else if (url.includes("/order-algo")) { algos.push(body); algoPending = [{ algoId: "P-1", instId: "SNX-USDT-SWAP" }]; data = [{ algoId: "P-1", sCode: "0" }]; }
+      else if (url.includes("orders-pending")) data = [];
+      else if (url.includes("/trade/order")) data = [{ ordId: "SN-1", sCode: "0" }];
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+
+    await handleIncomingMessage("SNXUSDT SHORT Entry: 0.21 SL: 0.22 TP1: 0.20", meta(), cfg);
+    const pos = (await getPositions())["SNXUSDT"];
+    expect(pos).toBeDefined();
+    // backdate past the grace period so the tick evaluates it
+    pos.openedAt = Date.now() - 10 * 60 * 1000;
+    const positions = await getPositions();
+    positions["SNXUSDT"] = pos;
+    await savePositions(positions);
+
+    // the stop has fired on OKX: position gone, its protective orders consumed
+    algoPending = [];
+    const placedBefore = algos.length;
+
+    await monitorTick(cfg);
+    // the zombie is gone, so nothing was re-placed for it
+    expect((await getPositions())["SNXUSDT"]).toBeUndefined();
+    expect(algos.length).toBe(placedBefore);
+
+    // and it stays gone on later ticks - no accumulation
+    await monitorTick(cfg);
+    await monitorTick(cfg);
+    expect(algos.length).toBe(placedBefore);
+    const rec = (await getOrders()).find((o) => o.message.includes("交易所已無此持倉"));
     expect(rec).toBeDefined();
   });
 });
