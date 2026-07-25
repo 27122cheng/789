@@ -772,9 +772,16 @@ export async function executeSignal(
         // leave the MAIN stop alone - the signal says it moves later, under its
         // own notice; the stop quoted here belongs to this tranche only.
         if (signal.entryPrice != null && addLive) {
+          // Protect the tranche on the order itself: its OWN stop (the signal
+          // gives one per tranche) and the position's current first target,
+          // which is what "加倉的止盈按照原本設定的" means.
+          const trancheSl = signal.stopLoss ?? p.stopLoss;
           const r = await placeEntry(
             client, true, sym, p.side, sizeUsdt, "limit", signal.entryPrice, refPrice, p.leverage,
-            settings.trading.orders.belowMinSize ?? "lift"
+            settings.trading.orders.belowMinSize ?? "lift",
+            settings.trading.orders.exchangeStops
+              ? { stopLoss: trancheSl, takeProfit: p.takeProfits[0] ?? null }
+              : undefined
           );
           p.pendingAdds = [
             ...(p.pendingAdds ?? []),
@@ -786,6 +793,7 @@ export async function executeSignal(
               qty: r.qty,
               sizeUsdt,
               stopLoss: signal.stopLoss ?? null,
+              attached: r.attached,
             },
           ];
           await savePositions(positions);
@@ -794,7 +802,9 @@ export async function executeSignal(
             { symbol: sym, side: p.side, sizeUsdt, qty: 0, price: signal.entryPrice, leverage: p.leverage },
             true, true,
             `加倉確認：已掛限價單 @ ${signal.entryPrice}（回踩成交）` +
-              (signal.stopLoss ? `，此筆止損 ${signal.stopLoss}` : "") +
+              (r.attached
+                ? `，已附帶此筆止損 ${trancheSl ?? "-"}／止盈 ${p.takeProfits[0] ?? "-"}`
+                : signal.stopLoss ? `，此筆止損 ${signal.stopLoss}` : "") +
               "；主倉止損不變，等後續通知",
             r.orderIds);
           return;
@@ -802,7 +812,10 @@ export async function executeSignal(
 
         const res = await placeEntry(
           client, addLive, sym, p.side, sizeUsdt, "market", null, refPrice, p.leverage,
-          settings.trading.orders.belowMinSize ?? "lift"
+          settings.trading.orders.belowMinSize ?? "lift",
+          settings.trading.orders.exchangeStops
+            ? { stopLoss: p.stopLoss, takeProfit: p.takeProfits[0] ?? null }
+            : undefined
         );
         const newQty = p.qty + res.qty;
         p.entryPrice = (p.entryPrice * p.qty + res.price * res.qty) / newQty;
@@ -812,7 +825,9 @@ export async function executeSignal(
         p.addCount += 1;
         await savePositions(positions);
         await setCooldown(sym, Date.now());
-        const addStopNote = await syncExchangeStops(client, settings, live, p);
+        const addStopNote = res.attached
+          ? "已附帶止盈止損"
+          : await syncExchangeStops(client, settings, live, p);
         await record("add",
           { symbol: sym, side: p.side, sizeUsdt, qty: res.qty, price: res.price, leverage: p.leverage },
           live && !p.dryRun, true,
@@ -1155,7 +1170,12 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
           pos.addCount += 1;
           changed = true;
           actions.push(`${sym}: 加倉限價單成交 @ ${add.level}`);
-          const note = await syncExchangeStops(client, settings, live, pos);
+          // A tranche that carried its own attached stop/target is already
+          // protected at ITS level; re-syncing would replace that with the main
+          // position's stop and silently discard the tranche's own.
+          const note = add.attached
+            ? `此筆已附帶止損 ${add.stopLoss ?? "-"}，保留不覆蓋`
+            : await syncExchangeStops(client, settings, live, pos);
           await record("add",
             { symbol: sym, side: pos.side, sizeUsdt: add.sizeUsdt ?? 0, qty: addQty, price: add.level, leverage: pos.leverage },
             true, true,

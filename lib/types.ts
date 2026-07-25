@@ -40,7 +40,11 @@ export interface PendingAdd {
   orderId?: string | null;
   qty?: number;            // base quantity submitted with that order
   sizeUsdt?: number;       // notional it represents
-  stopLoss?: number | null; // the tranche's own stop, for the record
+  stopLoss?: number | null; // the tranche's own stop
+  // true when that stop/target rode along on the order itself, so the tranche
+  // is already protected and must not be flattened into the main position's
+  // levels when it fills
+  attached?: boolean;
 }
 
 export interface Position {

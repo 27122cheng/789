@@ -998,6 +998,10 @@ describe("加倉確認 tranche", () => {
     // a resting LIMIT order at the tranche price, not a market buy
     const limitOrder = orders.find((o) => o.ordType === "limit");
     expect(limitOrder.px).toBe("103.0");
+    // the tranche is protected by the order itself, at ITS own stop
+    expect(limitOrder.attachAlgoOrds).toHaveLength(2);
+    expect(limitOrder.attachAlgoOrds[0].slTriggerPx).toBe("101.5");
+    expect(limitOrder.attachAlgoOrds[1].tpTriggerPx).toBe("110.0");
     // the tranche's stop must NOT retighten the whole position
     expect(pos.stopLoss).toBe(99);
     expect(pos.qty).toBe(qtyBefore);           // nothing added until it fills
@@ -1016,6 +1020,11 @@ describe("加倉確認 tranche", () => {
     expect(pos.addCount).toBe(1);
     expect(pos.entryPrice).toBeGreaterThan(100);   // averaged up toward 103
     expect(pos.stopLoss).toBe(99);                 // main stop still untouched
+    // the tranche keeps its own attached stop rather than being flattened to 99
+    const fillRec = (await getOrders()).find(
+      (o) => o.symbol === "ARBUSDT" && o.message.includes("加倉限價單成交")
+    );
+    expect(fillRec!.message).toContain("保留不覆蓋");
   });
 });
 
