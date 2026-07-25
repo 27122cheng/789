@@ -1908,3 +1908,96 @@ describe("PnL for a close the exchange executed", () => {
     expect(t.reason).toContain("交易所結算");
   });
 });
+
+describe("rejections that no fallback can fix", () => {
+  function okxCfg(): Settings {
+    const cfg = settings();
+    cfg.exchange = "okx";
+    cfg.okx = {
+      apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false,
+    };
+    cfg.trading.liveTrading = true;
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.risk.maxOpenPositions = 20;
+    cfg.trading.orders.entryType = "limit";
+    return cfg;
+  }
+
+  /** OKX with one listed instrument; every order is rejected with `sCode`. */
+  function stubReject(sCode: string, sMsg: string) {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      let data: any[] = [];
+      if (url.includes("/public/instruments")) {
+        data = [{ instId: "ATOM-USDT-SWAP", ctVal: "1", lotSz: "0.1", minSz: "0.1", tickSz: "0.001" }];
+      } else if (url.includes("/market/ticker")) {
+        data = [{ last: "9" }];
+      } else if (url.includes("/account/set-leverage")) {
+        data = [{ lever: "10" }];
+      } else if (url.includes("algo") || url.includes("orders-pending")) {
+        data = [];
+      } else if (url.includes("/trade/order")) {
+        return {
+          ok: true, status: 200,
+          json: async () => ({ code: "1", msg: "", data: [{ sCode, sMsg }] }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+  }
+
+  it("no margin: fails loudly instead of parking a watcher that cannot fill", async () => {
+    // the market fallback needs the same margin the limit order was refused,
+    // so downgrading to 到價自動進場 only hides the real reason
+    stubReject("51008", "Order failed. Insufficient USDT margin in account");
+    const cfg = okxCfg();
+    await handleIncomingMessage(
+      "ATOMUSDT LONG 10x Entry: 8 SL: 7.5 TP1: 9.5", meta(), cfg
+    );
+    expect((await getPositions())["ATOMUSDT"]).toBeUndefined();
+    const rec = (await getOrders()).find((o) => o.symbol === "ATOMUSDT");
+    expect(rec?.success).toBe(false);
+    expect(rec?.message).toMatch(/保證金/);
+  });
+
+  it("a coin OKX does not list is reported as such, not as a network problem", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      let data: any[] = [];
+      if (url.includes("/public/instruments")) {
+        data = [{ instId: "BTC-USDT-SWAP", ctVal: "0.01", lotSz: "0.1", minSz: "0.1", tickSz: "0.1" }];
+      } else if (url.includes("/market/ticker")) {
+        data = [{ last: "1" }];
+      }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+    const cfg = okxCfg();
+    await handleIncomingMessage(
+      "XSPCXUSDT LONG 10x Entry: 1 SL: 0.9 TP1: 1.2", meta(), cfg
+    );
+    expect((await getPositions())["XSPCXUSDT"]).toBeUndefined();
+    const rec = (await getOrders()).find((o) => o.symbol === "XSPCXUSDT");
+    expect(rec?.success).toBe(false);
+    expect(rec?.message).toMatch(/沒有這個永續合約|沒有上架/);
+  });
+
+  it("a failed instrument lookup is NOT reported as an unlisted coin", async () => {
+    // returning null on a broken catalogue call made a network blip read as
+    // "this coin does not exist", sending the user after the wrong problem
+    let instrumentCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (url.includes("/public/instruments")) {
+        instrumentCalls++;
+        return { ok: false, status: 503, json: async () => ({ code: "50026", msg: "system error" }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data: [{ last: "9" }] }) };
+    }));
+    const cfg = okxCfg();
+    await handleIncomingMessage(
+      "ATOMUSDT LONG 10x Entry: 8 SL: 7.5 TP1: 9.5", meta(), cfg
+    );
+    expect(instrumentCalls).toBeGreaterThan(0);
+    const rec = (await getOrders()).find((o) => o.symbol === "ATOMUSDT");
+    expect(rec?.success).toBe(false);
+    expect(rec?.message ?? "").not.toMatch(/沒有這個永續合約/);
+  });
+});

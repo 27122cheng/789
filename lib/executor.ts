@@ -170,9 +170,38 @@ function isPermissionDenied(msg: string): boolean {
   );
 }
 
+/** True when nothing this app can do will make the order work: the account is
+ *  rejected, has no money, or the coin has no contract at all.
+ *
+ *  This matters because a rejected LIMIT order otherwise downgrades the trade to
+ *  到價自動進場 - the monitor watching the price and entering at market. That is
+ *  a sensible fallback for a price/precision quarrel with the venue, but for
+ *  these three the market order fails exactly the same way, so the fallback just
+ *  parks a position that can never fill and hides the real reason for a while. */
+function isUnrecoverable(msg: string): boolean {
+  return isPermanentReject(msg) || /\b51008\b|[Ii]nsufficient .*margin/.test(msg);
+}
+
+/** The subset of the above that will never resolve on its own. Insufficient
+ *  margin is deliberately NOT here: it frees up as soon as another position
+ *  closes, so a watcher already waiting on a price is worth keeping. A coin the
+ *  venue does not list never becomes tradable, and neither does a key without
+ *  trading permission - those must be dropped, or every tick retries forever. */
+function isPermanentReject(msg: string): boolean {
+  return (
+    isPermissionDenied(msg) ||
+    /NO_CONTRACT|沒有這個永續合約|找不到合約/.test(msg)
+  );
+}
+
 /** Plain-Chinese cause + fix for the OKX credential/config errors that are
  *  otherwise just an opaque number. */
 function okxCodeHint(msg: string): string | null {
+  if (/NO_CONTRACT|沒有這個永續合約|找不到合約/.test(msg))
+    return (
+      "（OKX 沒有上架這個幣種的 USDT 永續合約，或訊號的幣種代號被解析錯了。" +
+      "請到「收到的訊息」看這則的原始內容核對代號；OKX 沒有的幣種本系統無法交易。）"
+    );
   if (/\b50101\b|APIKey does not match/i.test(msg))
     return "（金鑰的環境不符：模擬盤金鑰要勾「使用 OKX 模擬盤」，正式盤金鑰要取消勾選。兩者不通用。）";
   if (/\b50105\b|passphrase/i.test(msg))
@@ -185,8 +214,12 @@ function okxCodeHint(msg: string): string | null {
     return "（此金鑰綁了 IP 白名單，但 Vercel 的出口 IP 不固定 → 請把白名單清空。）";
   if (/\b51010\b/.test(msg))
     return "（帳戶模式不支援合約：請到 OKX 把帳戶模式改成「現貨和合約模式」以上。）";
-  if (/\b51008\b/.test(msg))
-    return "（可用保證金不足：確認 USDT 已從「資金帳戶」劃轉到「交易帳戶」。）";
+  if (/\b51008\b|[Ii]nsufficient .*margin/.test(msg))
+    return (
+      "（交易帳戶的可用保證金不足，這筆沒有下單。常見原因：①USDT 還在「資金帳戶」沒劃轉到「交易帳戶」；" +
+      "②同時開太多倉，保證金被既有持倉與掛單佔住 —— 未成交的限價單一樣會凍結保證金；" +
+      "③單筆金額或槓桿設定過大。可到設定調低「固定金額」或「同時最多持倉數」。）"
+    );
   if (/posSide/i.test(msg))
     return "（持倉模式參數不符：系統會自動偵測單向／雙向持倉，若持續出現請重新儲存一次設定以清除快取。）";
   return null;
@@ -884,10 +917,10 @@ export async function executeSignal(
                 note = `已在 ${venueName(settings)} 掛限價單 @ ${aligned.entry}（現價 ${refPrice}）`;
               } catch (err) {
                 const emsg = (err as Error).message;
-                // An account-permission rejection will hit the market fallback
-                // too, so fail now instead of parking a position that cannot
-                // ever be filled.
-                if (isPermissionDenied(emsg)) {
+                // An account-level rejection will hit the market fallback too,
+                // so fail now instead of parking a position that cannot ever
+                // be filled.
+                if (isUnrecoverable(emsg)) {
                   await record("open",
                     { symbol: sym, side: signal.side, sizeUsdt, qty: 0, price: aligned.entry, leverage },
                     live, false, `${venueName(settings)} 拒絕下單：${emsg}${okxCodeHint(emsg) ?? permHint(settings)}`);
@@ -1211,7 +1244,7 @@ export async function executeSignal(
     if (/AMOUNT_FILTER|MIN_?AMOUNT|MIN_?NOTIONAL|too small/i.test(msg)) {
       msg += "（下單金額低於 Pionex 最低下單額，請到設定調高「固定金額」）";
     }
-    if (isPermissionDenied(msg)) {
+    if (isUnrecoverable(msg)) {
       msg += okxCodeHint(msg) ?? permHint(settings);
     }
     await record(signal.action,
@@ -1425,8 +1458,8 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
       } catch (err) {
         const emsg = (err as Error).message;
         actions.push(`${sym}: 到價進場失敗: ${emsg}`);
-        if (isPermissionDenied(emsg)) {
-          // the account cannot trade perps via API - retrying every tick would
+        if (isPermanentReject(emsg)) {
+          // the account cannot trade this, ever - retrying every tick would
           // just spam the log, so drop the position and say why once.
           delete positions[sym];
           changed = true;

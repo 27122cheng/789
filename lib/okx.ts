@@ -32,6 +32,11 @@ function stepDecimals(step: number): number | null {
   return decimalsOf(s);
 }
 
+/** Marks "this coin has no perpetual on OKX" - a permanent condition, unlike
+ *  every other order rejection, so callers must give up rather than retry or
+ *  fall back to another entry method. */
+export const NO_CONTRACT = "OKX 沒有這個永續合約：";
+
 export class OkxApiError extends Error {
   code?: string;
   payload?: Record<string, unknown>;
@@ -162,13 +167,19 @@ export class OkxClient implements ExchangeClient {
     return this.posModeCache!;
   }
 
+  /** The instrument, or null when the catalogue loaded fine and simply has no
+   *  such contract. A FAILED catalogue load throws instead of returning null:
+   *  the two mean opposite things ("this coin is not listed on OKX, give up"
+   *  vs "ask again in a minute") and reporting a network blip as an unlisted
+   *  coin sends the user hunting for a problem that is not there. */
   private async infoFor(symbolLike: string): Promise<any | null> {
     const instId = /-SWAP$/i.test(symbolLike) ? symbolLike : this.perpSymbol(symbolLike);
-    try {
-      return (await this.loadInstruments())[instId] ?? null;
-    } catch {
-      return null;
-    }
+    return (await this.loadInstruments())[instId] ?? null;
+  }
+
+  /** Read-only lookups that only ever want a hint, never a hard failure. */
+  private async infoOrNull(symbolLike: string): Promise<any | null> {
+    return await this.infoFor(symbolLike).catch(() => null);
   }
 
   /** Contracts for a base-asset quantity, snapped DOWN to the lot step and not
@@ -239,13 +250,13 @@ export class OkxClient implements ExchangeClient {
   }
 
   async pricePrecision(symbol: string): Promise<number | null> {
-    const info = await this.infoFor(symbol);
+    const info = await this.infoOrNull(symbol);
     return info?.tickSz != null ? decimalsOf(info.tickSz) : null;
   }
 
   /** Limits converted from contracts back into BASE-ASSET units. */
   async orderFilters(symbol: string): Promise<OrderFilters> {
-    const info = await this.infoFor(symbol);
+    const info = await this.infoOrNull(symbol);
     if (!info) {
       return {
         baseDecimals: null, quoteDecimals: null,
@@ -434,7 +445,7 @@ export class OkxClient implements ExchangeClient {
 
   async placeOrder(opts: PlaceOrderOpts): Promise<PlacedOrder> {
     const info = await this.infoFor(opts.symbol);
-    if (!info) throw new OkxApiError(`OKX 找不到合約 ${opts.symbol}`);
+    if (!info) throw new OkxApiError(NO_CONTRACT + opts.symbol, "NO_CONTRACT");
     const body: Record<string, unknown> = {
       instId: opts.symbol,
       tdMode: this.tdMode,
@@ -522,7 +533,7 @@ export class OkxClient implements ExchangeClient {
   }
 
   async describeOrderSize(symbol: string, baseQty: number): Promise<string | null> {
-    const info = await this.infoFor(symbol);
+    const info = await this.infoOrNull(symbol);
     if (!info) return null;
     const ctVal = Number(info.ctVal);
     if (!Number.isFinite(ctVal) || ctVal <= 0) return null;
@@ -548,7 +559,7 @@ export class OkxClient implements ExchangeClient {
     const tps = (opts.takeProfits ?? []).filter((t) => t.price > 0);
     if (!hasSl && !tps.length) return [];
     const info = await this.infoFor(opts.symbol);
-    if (!info) throw new OkxApiError(`OKX 找不到合約 ${opts.symbol}`);
+    if (!info) throw new OkxApiError(NO_CONTRACT + opts.symbol, "NO_CONTRACT");
 
     const dec = decimalsOf(info.tickSz) ?? 8;
     const lotDec = this.lotDecimals(info);
