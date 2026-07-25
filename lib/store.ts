@@ -29,6 +29,7 @@ const K_WEBHOOK_EVENTS = KEY_PREFIX + "webhookEvents";
 const K_LISTENER = KEY_PREFIX + "listenerSession";
 const K_MONITOR = KEY_PREFIX + "monitorRun";
 const K_TRADES = KEY_PREFIX + "trades";
+const K_STOPSNAP = KEY_PREFIX + "stopSnapshot";
 
 // 10 pages x 10 rows in the UI; oldest entries beyond this are dropped
 const MAX_LOG = 100;
@@ -191,6 +192,23 @@ export async function setMonitorRun(run: MonitorRun): Promise<void> {
 
 export async function getMonitorRun(): Promise<MonitorRun | null> {
   return await kvGet<MonitorRun>(K_MONITOR);
+}
+
+// -------------------------------------------- exchange protection snapshot
+/** What protective orders the exchange actually holds, per symbol, as last seen
+ *  by the monitor. Stored so the dashboard can show it without making its own
+ *  exchange calls on every poll (which would invite rate limiting). */
+export interface StopSnapshot {
+  at: number;
+  bySymbol: Record<string, { kind: "tp" | "sl"; trigger: number | null }[]>;
+}
+
+export async function setStopSnapshot(snap: StopSnapshot): Promise<void> {
+  await kvSet(K_STOPSNAP, snap);
+}
+
+export async function getStopSnapshot(): Promise<StopSnapshot | null> {
+  return await kvGet<StopSnapshot>(K_STOPSNAP);
 }
 
 // ------------------------------------ listener login (Telethon) persistence

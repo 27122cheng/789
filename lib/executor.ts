@@ -24,6 +24,7 @@ import {
   purgeSymbolRecords,
   savePositions,
   setCooldown,
+  setStopSnapshot,
 } from "./store";
 import { OrderRecord, ParsedSignal, Position, Settings } from "./types";
 
@@ -1276,7 +1277,16 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
     return open.some((o: any) => String(o.orderId ?? o.id ?? "") === orderId);
   };
 
-  let stopCache: { symbol: string; algoId: string }[] | null | undefined;
+  let stopCache:
+    | {
+        symbol: string;
+        algoId: string;
+        kind: "tp" | "sl";
+        trigger: number | null;
+        size: string | null;
+      }[]
+    | null
+    | undefined;
   const allStopOrders = async () => {
     if (stopCache === undefined) {
       stopCache = client.fetchAllStopOrders
@@ -1850,6 +1860,14 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
           .filter((p) => !p.dryRun)
           .map((p) => client.perpSymbol(p.symbol))
       );
+      // record what protection exists so the dashboard can display it without
+      // making exchange calls of its own
+      const bySymbol: Record<string, { kind: "tp" | "sl"; trigger: number | null }[]> = {};
+      for (const o of stops) {
+        (bySymbol[o.symbol] ??= []).push({ kind: o.kind, trigger: o.trigger });
+      }
+      await setStopSnapshot({ at: Date.now(), bySymbol });
+
       const orphans = stops.filter(
         (o) => !heldSymbols.has(o.symbol) && !trackedSymbols.has(o.symbol)
       );

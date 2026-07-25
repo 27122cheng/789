@@ -9,6 +9,26 @@ function fmtTime(ms: number): string {
   return new Date(ms).toLocaleString("zh-TW", { hour12: false });
 }
 
+/** What the exchange itself is holding for this symbol, as last seen by the
+ *  monitor. Shown because OKX labels a stop-loss and a take-profit identically
+ *  ("止盈止損·平空", same size) - only the trigger price differs - so a protected
+ *  position looks like two duplicate orders unless the roles are spelled out. */
+function ProtectionCell({ list }: { list: any[] | undefined }) {
+  if (!list?.length) return <td className="mono">-</td>;
+  const fmt = (t: number | null) => (t == null ? "?" : String(t));
+  const sl = list.filter((o) => o.kind === "sl").map((o) => fmt(o.trigger));
+  const tp = list
+    .filter((o) => o.kind === "tp")
+    .map((o) => fmt(o.trigger));
+  return (
+    <td className="mono" style={{ fontSize: 12 }}>
+      {sl.length ? <span style={{ color: "var(--red)" }}>SL {sl.join(", ")}</span> : null}
+      {sl.length && tp.length ? <br /> : null}
+      {tp.length ? <span style={{ color: "var(--green)" }}>TP {tp.join(", ")}</span> : null}
+    </td>
+  );
+}
+
 function SideCell({ side }: { side: string | null }) {
   if (!side) return <td>-</td>;
   return (
@@ -157,6 +177,7 @@ export default function Dashboard() {
                 <tr>
                   <th>幣種</th><th>方向</th><th>槓桿</th><th>均價</th>
                   <th>數量</th><th>名目 USDT</th><th>止損</th><th>止盈</th>
+                  <th>交易所保護單</th>
                   <th>加倉位</th><th>加倉次數</th><th>模式</th>
                 </tr>
               </thead>
@@ -171,6 +192,7 @@ export default function Dashboard() {
                     <td className="mono">{p.sizeUsdt?.toFixed(2)}</td>
                     <td className="mono">{p.stopLoss ? p.stopLoss.toFixed(6) : "-"}</td>
                     <td className="mono">{p.takeProfits?.join(" / ") || "-"}</td>
+                    <ProtectionCell list={state.stopSnapshot?.bySymbol?.[p.symbol]} />
                     <td className="mono">
                       {(p.pendingAdds ?? []).length
                         ? p.pendingAdds.map((a: any) =>
@@ -192,6 +214,14 @@ export default function Dashboard() {
               </tbody>
             </table>
           </div>
+        )}
+        {positions.length > 0 && state.stopSnapshot && (
+          <p className="hint" style={{ marginTop: 10 }}>
+            「交易所保護單」是交易所上真實存在的委託（{fmtTime(state.stopSnapshot.at)} 更新）。
+            交易所的列表會把止損與止盈都寫成「止盈止損·平空／平多」、數量也相同，
+            只有觸發價不一樣，所以看起來像重複的單 —— 這一欄直接標明哪個是 SL、哪個是 TP。
+            一個持倉有 1 個 SL + N 個分批 TP 是正常的。
+          </p>
         )}
         {positions.length > 0 && (
           <button

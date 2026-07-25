@@ -265,6 +265,27 @@ describe("okx protective-order bookkeeping must not guess", () => {
     stubFail(false, [{ algoId: "A-9", instId: "SNX-USDT-SWAP" }]);
     const c = new OkxClient("k", "s", "p");
     const all = await c.fetchAllStopOrders();
-    expect(all[0]).toEqual({ symbol: "SNX-USDT-SWAP", algoId: "A-9" });
+    expect(all[0]).toEqual({
+      symbol: "SNX-USDT-SWAP",
+      algoId: "A-9",
+      kind: "tp",
+      trigger: null,
+      size: null,
+    });
+  });
+
+  it("labels stop-loss and take-profit apart, with their triggers", async () => {
+    // the exchange shows both as one indistinguishable "止盈止損" row, so the
+    // trigger field is the only thing that says which is which
+    stubFail(false, [
+      { algoId: "A-1", instId: "BTC-USDT-SWAP", slTriggerPx: "64278.3", sz: "2" },
+      { algoId: "A-2", instId: "BTC-USDT-SWAP", tpTriggerPx: "62042.9", sz: "2" },
+    ]);
+    const c = new OkxClient("k", "s", "p");
+    const all = await c.fetchAllStopOrders();
+    const sl = all.find((o) => o.algoId === "A-1");
+    const tp = all.find((o) => o.algoId === "A-2");
+    expect(sl).toMatchObject({ kind: "sl", trigger: 64278.3, size: "2" });
+    expect(tp).toMatchObject({ kind: "tp", trigger: 62042.9, size: "2" });
   });
 });

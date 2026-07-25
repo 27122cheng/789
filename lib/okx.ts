@@ -612,13 +612,28 @@ export class OkxClient implements ExchangeClient {
       .map((r: any) => ({ symbol: String(r.instId), orderId: String(r.ordId) }));
   }
 
-  /** Every pending algo order on the account, for orphan cleanup. */
-  async fetchAllStopOrders(): Promise<{ symbol: string; algoId: string }[]> {
-    const out: { symbol: string; algoId: string }[] = [];
+  /** Every pending algo order on the account, for orphan cleanup and for showing
+   *  what protection actually exists. OKX lists a stop and a target as separate
+   *  rows with the same size - only the trigger price distinguishes them - so the
+   *  kind and trigger are reported to make them readable. */
+  async fetchAllStopOrders(): Promise<
+    { symbol: string; algoId: string; kind: "tp" | "sl"; trigger: number | null; size: string | null }[]
+  > {
+    const out: any[] = [];
     for (const ordType of ["oco", "conditional"]) {
       const rows = await this.request("GET", "/api/v5/trade/orders-algo-pending", { ordType });
       for (const r of rows) {
-        if (r?.algoId && r?.instId) out.push({ symbol: String(r.instId), algoId: String(r.algoId) });
+        if (!r?.algoId || !r?.instId) continue;
+        const sl = Number(r.slTriggerPx);
+        const tp = Number(r.tpTriggerPx);
+        const hasSl = Number.isFinite(sl) && sl > 0;
+        out.push({
+          symbol: String(r.instId),
+          algoId: String(r.algoId),
+          kind: hasSl ? "sl" : "tp",
+          trigger: hasSl ? sl : Number.isFinite(tp) && tp > 0 ? tp : null,
+          size: r.sz ? String(r.sz) : null,
+        });
       }
     }
     return out;

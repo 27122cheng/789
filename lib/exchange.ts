@@ -96,7 +96,15 @@ export interface ExchangeClient {
   fetchAllOpenOrders?(): Promise<{ symbol: string; orderId: string }[]>;
   /** Every protective order on the account, also used to clean up ones left
    *  behind by a position that no longer exists. */
-  fetchAllStopOrders?(): Promise<{ symbol: string; algoId: string }[]>;
+  fetchAllStopOrders?(): Promise<
+    {
+      symbol: string;
+      algoId: string;
+      kind: "tp" | "sl";
+      trigger: number | null;
+      size: string | null;
+    }[]
+  >;
   cancelStopOrderIds?(items: { symbol: string; algoId: string }[]): Promise<number>;
 
   /** The positions the exchange actually holds. The exchange is the source of
