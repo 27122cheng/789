@@ -6,7 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleIncomingMessage, monitorTick } from "../executor";
-import { getOrders, getPositions, getSignals, savePositions } from "../store";
+import { getOrders, getPositions, getSignals, getTrades, savePositions } from "../store";
 import { DEFAULT_SETTINGS, Settings } from "../types";
 
 function settings(): Settings {
@@ -48,6 +48,8 @@ afterEach(() => vi.unstubAllGlobals());
 describe("dry-run pipeline", () => {
   it("open -> add -> move SL to breakeven -> TP/SL monitoring", async () => {
     const cfg = settings();
+    // this case covers target-based splitting, so R must not take over
+    cfg.trading.orders.rTakeProfit.enabled = false;
 
     // 1. open long from a signal (price lookup fails -> entry price used)
     await handleIncomingMessage(
@@ -109,6 +111,7 @@ describe("dry-run pipeline", () => {
 
   it("splitTakeProfit=false closes the whole position at the first TP", async () => {
     const cfg = settings();
+    cfg.trading.orders.rTakeProfit.enabled = false;
     cfg.trading.orders.splitTakeProfit = false;
     await handleIncomingMessage(
       "BTCUSDT LONG Entry: 60000 TP1: 61000 TP2: 62000 SL: 59000", meta(), cfg
@@ -1711,5 +1714,51 @@ describe("how a position gets split", () => {
     stubFetchPrice(130);
     await monitorTick(cfg);
     expect((await getPositions())["ENSUSDT"]).toBeUndefined();
+  });
+});
+
+describe("finished-trade history", () => {
+  it("sums every partial close into one trade record", async () => {
+    const cfg = settings();
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.risk.maxOpenPositions = 50;
+    cfg.trading.orders.rTakeProfit = {
+      enabled: true, levels: [{ r: 1, closePercent: 50 }], applyWhen: "always",
+    };
+    // entry 100, stop 95 -> R = 5; single final target at 130
+    await handleIncomingMessage("CFXUSDT LONG Entry: 100 SL: 95 最終止盈: 130", meta(), cfg);
+    const q0 = (await getPositions())["CFXUSDT"].originalQty;
+
+    stubFetchPrice(105);      // 1R: closes half at +5/unit
+    await monitorTick(cfg);
+    stubFetchPrice(130);      // final target: closes the rest at +30/unit
+    await monitorTick(cfg);
+    expect((await getPositions())["CFXUSDT"]).toBeUndefined();
+
+    const trades = await getTrades();
+    const t = trades.find((x) => x.symbol === "CFXUSDT")!;
+    expect(t).toBeDefined();
+    // both legs counted, not just the last exit
+    expect(t.qty).toBeCloseTo(q0, 6);
+    expect(t.pnlUsdt).toBeCloseTo((q0 / 2) * 5 + (q0 / 2) * 30, 4);
+    expect(t.reason).toBe("tp_hit");
+    expect(t.rMultiple).toBeGreaterThan(0);
+  });
+
+  it("records a loss when the stop is hit", async () => {
+    const cfg = settings();
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.risk.maxOpenPositions = 50;
+    await handleIncomingMessage("ARUSDT LONG Entry: 100 SL: 95 TP1: 130", meta(), cfg);
+    const q0 = (await getPositions())["ARUSDT"].originalQty;
+
+    stubFetchPrice(94);
+    await monitorTick(cfg);
+    expect((await getPositions())["ARUSDT"]).toBeUndefined();
+
+    const t = (await getTrades()).find((x) => x.symbol === "ARUSDT")!;
+    expect(t.pnlUsdt).toBeCloseTo(q0 * (94 - 100), 4);
+    expect(t.pnlUsdt).toBeLessThan(0);
+    expect(t.reason).toBe("sl_hit");
   });
 });

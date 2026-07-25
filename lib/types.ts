@@ -70,6 +70,10 @@ export interface Position {
   entryOrderType: "market" | "limit";
   beMoved: boolean;            // SL already moved to breakeven after TP1
   initialRisk: number | null;  // |entry - stopLoss| at open, for R-multiples
+  // realised PnL accumulated across partial closes, so the finished trade can be
+  // recorded with its true total rather than only the last exit
+  realizedPnl: number;
+  closedQty: number;
   rTargets: { r: number; closePercent: number; done: boolean }[];
   // While set, the position hasn't been filled yet. Two ways of waiting:
   //   "limit_order" - a REAL limit order rests on Pionex at `target` (orderId
@@ -108,6 +112,27 @@ export interface OrderRecord {
   success: boolean;
   message: string;
   orderIds: string[];
+}
+
+/** One finished trade, written when a position fully closes. Realised PnL is
+ *  accumulated across every partial close, so a trade that scaled out at several
+ *  R levels lands as a single row with the total. */
+export interface TradeRecord {
+  symbol: string;
+  side: "long" | "short";
+  leverage: number;
+  entryPrice: number;          // average entry, including any adds
+  exitPrice: number;           // price of the final close
+  qty: number;                 // total size traded
+  sizeUsdt: number;
+  pnlUsdt: number;             // realised, summed over all partial closes
+  pnlPercent: number;          // against the margin committed
+  rMultiple: number | null;    // pnl expressed in initial-risk units
+  addCount: number;
+  openedAt: number;
+  closedAt: number;
+  reason: string;              // sl_hit | tp_hit | close | exchange | ...
+  dryRun: boolean;
 }
 
 export interface SignalRecord {
@@ -232,11 +257,14 @@ export interface Settings {
       rTakeProfit: {
         enabled: boolean;
         levels: { r: number; closePercent: number }[];
-        // 短線單 carries 止盈一/止盈二, so it can be split across its own targets.
-        // 長線單 carries a single 最終止盈 and cannot, so R levels are what splits
-        // it. "single_target" applies them only in that case, which keeps the two
-        // mechanisms from both closing parts of the same position; "always"
-        // applies them regardless.
+        // R levels are the single splitting mechanism for both signal shapes, so
+        // 短線單 and 長線單 behave identically. Intermediate targets then close
+        // nothing on their own (they still move the stop to breakeven) and the
+        // FINAL target closes whatever is left - so a trade that never reaches
+        // the higher R levels is simply closed in full at 止盈二.
+        //   "always"        - R splits every trade (default)
+        //   "single_target" - only when the signal has one target, leaving
+        //                     multi-target signals to split across their targets
         applyWhen: "single_target" | "always";
       };
     };
@@ -313,7 +341,7 @@ export const DEFAULT_SETTINGS: Settings = {
       rTakeProfit: {
         enabled: true,
         levels: [{ r: 1, closePercent: 50 }],
-        applyWhen: "single_target",
+        applyWhen: "always",
       },
     },
     trailing: {

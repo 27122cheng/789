@@ -17,6 +17,7 @@ import { OkxClient } from "./okx";
 import {
   appendOrder,
   appendSignal,
+  appendTrade,
   checkAndMarkSeen,
   getCooldowns,
   getPositions,
@@ -496,6 +497,49 @@ async function syncExchangeStops(
   }
 }
 
+/** Books a close against the position's running totals, so a trade that scaled
+ *  out at several levels can be filed with its true total rather than only the
+ *  last exit. */
+function bookClose(pos: Position, qty: number, exitPrice: number): number {
+  const dir = pos.side === "long" ? 1 : -1;
+  const pnl = (exitPrice - pos.entryPrice) * qty * dir;
+  pos.realizedPnl = (pos.realizedPnl ?? 0) + pnl;
+  pos.closedQty = (pos.closedQty ?? 0) + qty;
+  return pnl;
+}
+
+/** Files a finished trade for the win-rate/profit page. */
+async function finishTrade(
+  pos: Position,
+  exitPrice: number,
+  reason: string
+): Promise<void> {
+  const qty = pos.closedQty ?? 0;
+  if (qty <= 0) return;   // nothing was ever closed - not a completed trade
+  const margin = pos.leverage > 0 ? pos.sizeUsdt / pos.leverage : pos.sizeUsdt;
+  const pnl = pos.realizedPnl ?? 0;
+  await appendTrade({
+    symbol: pos.symbol,
+    side: pos.side,
+    leverage: pos.leverage,
+    entryPrice: pos.entryPrice,
+    exitPrice,
+    qty,
+    sizeUsdt: pos.sizeUsdt,
+    pnlUsdt: +pnl.toFixed(6),
+    pnlPercent: margin > 0 ? +((pnl / margin) * 100).toFixed(3) : 0,
+    rMultiple:
+      pos.initialRisk && pos.initialRisk > 0 && qty > 0
+        ? +(pnl / (pos.initialRisk * qty)).toFixed(3)
+        : null,
+    addCount: pos.addCount,
+    openedAt: pos.openedAt,
+    closedAt: Date.now(),
+    reason,
+    dryRun: pos.dryRun,
+  });
+}
+
 async function closeQty(
   client: ExchangeClient,
   live: boolean,
@@ -647,17 +691,20 @@ export async function executeSignal(
             .map((level) => ({ level, armedAt: null, armed: false })),
           entryOrderType: entryType,
           beMoved: false,
+          realizedPnl: 0,
+          closedQty: 0,
           openedAt: Date.now(),
           addCount: 0,
           dryRun: !live,
         };
-        // R levels are how a single-target trade gets split. When the signal
-        // carries several targets, splitting across those is used instead, so
-        // applying both would have two mechanisms closing the same position.
+        // R levels split both signal shapes identically. When they are in charge,
+        // intermediate targets must not ALSO close a slice - that would have two
+        // mechanisms closing the same position - so only the final target closes,
+        // and it closes everything left.
         const targetsCount = common.takeProfits.length;
         const rApplies =
           !!rt?.enabled &&
-          (rt.applyWhen === "always" || targetsCount <= 1);
+          (rt.applyWhen !== "single_target" || targetsCount <= 1);
         const mkR = (risk: number | null) =>
           rApplies && risk
             ? rt.levels.map((l) => ({ r: l.r, closePercent: l.closePercent, done: false }))
@@ -966,10 +1013,13 @@ export async function executeSignal(
         if (!pos) {
           return; // close signal for a symbol we don't hold - ignore silently
         }
+        const exitPx = (await fetchPriceSafe(client, sym, pos.entryPrice)) ?? pos.entryPrice;
         const ids = await closeQty(client, live, pos, pos.qty);
         if (live && !pos.dryRun && client.cancelStopOrders) {
           await client.cancelStopOrders(client.perpSymbol(sym)).catch(() => {});
         }
+        bookClose(pos, pos.qty, exitPx);
+        await finishTrade(pos, exitPx, "close");
         delete positions[sym];
         await savePositions(positions);
         await record("close",
@@ -1304,6 +1354,11 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
             await client.cancelStopOrders(venue).catch(() => {});
           }
           await client.cancelAllOrders(venue).catch(() => {});
+          // the exchange executed it, so the exit price is unknown precisely;
+          // the stop is the best available estimate of where it went out
+          const exit = pos.stopLoss ?? price;
+          bookClose(pos, pos.qty, exit);
+          await finishTrade(pos, exit, "exchange");
           delete positions[sym];
           changed = true;
           actions.push(`${sym}: 交易所已無持倉（止損或平倉已執行）→ 同步移除追蹤`);
@@ -1527,6 +1582,7 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
         if (qtyToClose <= 1e-9) { t.done = true; continue; }
         try {
           const ids = await closeQty(client, live, pos, qtyToClose);
+          bookClose(pos, qtyToClose, price);
           pos.qty -= qtyToClose;
           t.done = true;
           changed = true;
@@ -1542,6 +1598,7 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
         }
       }
       if (pos.qty <= 1e-9) {
+        await finishTrade(pos, price, "r_tp");
         delete positions[sym];
         actions.push(`${sym}: R 止盈已全數平倉`);
         continue;
@@ -1555,6 +1612,8 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
         if (live && !pos.dryRun && client.cancelStopOrders) {
           await client.cancelStopOrders(client.perpSymbol(sym)).catch(() => {});
         }
+        bookClose(pos, pos.qty, price);
+        await finishTrade(pos, price, "sl_hit");
         delete positions[sym];
         changed = true;
         actions.push(`${sym}: SL hit at ${price}, position closed`);
@@ -1574,14 +1633,43 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
     // of the original qty (last target closes the remainder). When splitting
     // is off, the first hit target closes the whole position.
     const splitTp = settings.trading.orders.splitTakeProfit !== false;
+    // When R levels are doing the splitting, an intermediate target closes
+    // nothing (it still moves the stop to breakeven below); the final target
+    // closes the remainder, so a trade that never reaches the higher R levels
+    // ends fully closed at 止盈二.
+    const rSplitting = (pos.rTargets ?? []).length > 0;
     while (pos.takeProfits.length && (price - pos.takeProfits[0]) * dir >= 0) {
       const target = pos.takeProfits.shift()!;
+      const isFinalTarget = pos.takeProfits.length === 0;
       const fraction = pos.tpCountOriginal > 0 ? 1 / pos.tpCountOriginal : 1;
-      const qtyToClose = !splitTp || pos.takeProfits.length === 0
-        ? pos.qty // close everything (no-split, or the last target)
+      const qtyToClose = isFinalTarget || !splitTp || rSplitting
+        ? (rSplitting && !isFinalTarget ? 0 : pos.qty)
         : Math.min(pos.qty, pos.originalQty * fraction);
+      if (qtyToClose <= 0) {
+        // target passed but R is in charge of partials - note it and let the
+        // breakeven move below still happen
+        actions.push(`${sym}: 觸及止盈 ${target}（分批由 R 倍數負責，未平倉）`);
+        changed = true;
+        const t = settings.trading.trailing;
+        if (t.moveToBreakevenOnTp1 && !pos.beMoved && pos.qty > 1e-9) {
+          const offset = t.breakevenOffsetPercent / 100;
+          const newSl = pos.side === "long"
+            ? pos.entryPrice * (1 - offset)
+            : pos.entryPrice * (1 + offset);
+          const better = pos.stopLoss == null ||
+            (pos.side === "long" ? newSl > pos.stopLoss : newSl < pos.stopLoss);
+          pos.beMoved = true;
+          if (better) {
+            pos.stopLoss = newSl;
+            await syncExchangeStops(client, settings, live, pos);
+            actions.push(`${sym}: 止損移到保本區 ${newSl.toFixed(6)}`);
+          }
+        }
+        continue;
+      }
       try {
         const ids = await closeQty(client, live, pos, qtyToClose);
+        bookClose(pos, qtyToClose, price);
         pos.qty -= qtyToClose;
         changed = true;
         sizeShrunk = true;
@@ -1619,6 +1707,7 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
         break;
       }
       if (pos.qty <= 1e-9) {
+        await finishTrade(pos, price, "tp_hit");
         delete positions[sym];
         actions.push(`${sym}: all targets filled, position fully closed`);
         break;

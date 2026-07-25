@@ -8,6 +8,7 @@
 import { Redis } from "@upstash/redis";
 import {
   DEFAULT_SETTINGS,
+  TradeRecord,
   OrderRecord,
   Position,
   Settings,
@@ -27,10 +28,13 @@ const K_CRON_SECRET = KEY_PREFIX + "cronSecret";
 const K_WEBHOOK_EVENTS = KEY_PREFIX + "webhookEvents";
 const K_LISTENER = KEY_PREFIX + "listenerSession";
 const K_MONITOR = KEY_PREFIX + "monitorRun";
+const K_TRADES = KEY_PREFIX + "trades";
 
 // 10 pages x 10 rows in the UI; oldest entries beyond this are dropped
 const MAX_LOG = 100;
 const MAX_WEBHOOK_EVENTS = 100;
+// trade history drives the win-rate stats, so it is kept well beyond the logs
+const MAX_TRADES = 500;
 
 // Built-in fallback credentials (owner's Upstash database) so the app works
 // without any Vercel environment configuration. Env vars take precedence.
@@ -136,6 +140,23 @@ export async function appendOrder(record: OrderRecord): Promise<void> {
 
 export async function getOrders(): Promise<OrderRecord[]> {
   return (await kvGet<OrderRecord[]>(K_ORDERS)) ?? [];
+}
+
+// ------------------------------------------------------------ trade history
+/** Finished trades, newest first. Kept longer than the action log: this is what
+ *  win rate and cumulative profit are computed from. */
+export async function appendTrade(record: TradeRecord): Promise<void> {
+  const list = (await kvGet<TradeRecord[]>(K_TRADES)) ?? [];
+  list.unshift(record);
+  await kvSet(K_TRADES, list.slice(0, MAX_TRADES));
+}
+
+export async function getTrades(): Promise<TradeRecord[]> {
+  return (await kvGet<TradeRecord[]>(K_TRADES)) ?? [];
+}
+
+export async function clearTrades(): Promise<void> {
+  await kvSet(K_TRADES, []);
 }
 
 /** Empties the signal and order logs (dashboard lists). */
