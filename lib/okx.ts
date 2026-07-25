@@ -277,6 +277,37 @@ export class OkxClient implements ExchangeClient {
     return Number.isFinite(v) ? v : 0;
   }
 
+  /** Open swap positions, converted from contracts back to base units. */
+  async fetchPositions(): Promise<
+    { symbol: string; side: "long" | "short"; qty: number; entryPrice: number }[]
+  > {
+    const rows = await this.request("GET", "/api/v5/account/positions", {
+      instType: "SWAP",
+    });
+    const out: { symbol: string; side: "long" | "short"; qty: number; entryPrice: number }[] = [];
+    for (const r of rows) {
+      const contracts = Number(r?.pos);
+      if (!Number.isFinite(contracts) || contracts === 0) continue;
+      const info = await this.infoFor(String(r.instId));
+      const ctVal = Number(info?.ctVal);
+      if (!Number.isFinite(ctVal) || ctVal <= 0) continue;
+      // hedge mode names the side; in net mode the sign of `pos` carries it
+      const side: "long" | "short" =
+        r.posSide === "long" || r.posSide === "short"
+          ? r.posSide
+          : contracts > 0
+          ? "long"
+          : "short";
+      out.push({
+        symbol: String(r.instId),
+        side,
+        qty: Math.abs(contracts) * ctVal,
+        entryPrice: Number(r.avgPx) || 0,
+      });
+    }
+    return out;
+  }
+
   async setLeverage(instId: string, leverage: number): Promise<void> {
     await this.request("POST", "/api/v5/account/set-leverage", {}, {
       instId, lever: String(leverage), mgnMode: this.tdMode,

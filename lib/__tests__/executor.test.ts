@@ -819,3 +819,54 @@ describe("self-healing exchange stops", () => {
     expect(algos).toHaveLength(1);
   });
 });
+
+describe("reconciling with the exchange", () => {
+  it("adopts a position the exchange filled while the monitor was down", async () => {
+    const cfg = settings();
+    cfg.exchange = "okx";
+    cfg.okx = {
+      apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false,
+    };
+    cfg.trading.liveTrading = true;
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.risk.maxOpenPositions = 50;
+    cfg.trading.orders.entryType = "limit";
+    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 600, percentBalance: 5 };
+
+    let exchangePositions: any[] = [];
+    const algos: any[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any[] = [];
+      if (url.includes("/account/config")) data = [{ posMode: "net_mode" }];
+      else if (url.includes("/public/instruments")) {
+        data = [{ instId: "SEI-USDT-SWAP", ctVal: "1", lotSz: "1", minSz: "1", tickSz: "0.0001" }];
+      } else if (url.includes("/market/ticker")) data = [{ last: "3.1" }];
+      else if (url.includes("/account/positions")) data = exchangePositions;
+      else if (url.includes("/orders-algo-pending")) data = algos.length ? [{ algoId: "A-3" }] : [];
+      else if (url.includes("/order-algo")) { algos.push(body); data = [{ algoId: "A-3", sCode: "0" }]; }
+      else if (url.includes("/trade/orders-pending")) data = [{ ordId: "P-1" }];
+      else if (url.includes("/trade/order")) data = [{ ordId: "P-1", sCode: "0" }];
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+
+    // entry rests below the market -> tracked as pending, qty 0
+    await handleIncomingMessage("SEIUSDT LONG Entry: 3.0 SL: 2.8 TP1: 3.4", meta(), cfg);
+    let pos = (await getPositions())["SEIUSDT"];
+    expect(pos.pendingEntry).toBeTruthy();
+    expect(pos.qty).toBe(0);
+
+    // OKX filled it while nothing was watching
+    exchangePositions = [{ instId: "SEI-USDT-SWAP", pos: "200", posSide: "net", avgPx: "3.0" }];
+    await monitorTick(cfg);
+
+    pos = (await getPositions())["SEIUSDT"];
+    expect(pos.pendingEntry).toBeNull();
+    expect(pos.qty).toBe(200);          // 200 contracts x ctVal 1
+    expect(pos.entryPrice).toBe(3.0);
+    expect(pos.initialRisk).toBeCloseTo(0.2, 6);
+    // and the same tick protects it
+    expect(algos.length).toBeGreaterThan(0);
+  });
+});

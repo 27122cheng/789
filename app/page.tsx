@@ -121,6 +121,31 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {(() => {
+        const run = state.monitorRun;
+        const ageMs = run ? Date.now() - run.at : null;
+        // the cron is meant to fire every minute; treat >5 min as stopped
+        const stale = ageMs == null || ageMs > 5 * 60 * 1000;
+        if (!stale && !run.error) {
+          return (
+            <p className="hint">
+              ✅ 監控正常運作 — 最後執行 {Math.round((ageMs ?? 0) / 1000)} 秒前
+              {run.actionCount ? `（${run.actionCount} 個動作）` : ""}
+            </p>
+          );
+        }
+        return (
+          <div className="banner live" style={{ marginBottom: 14 }}>
+            ⚠️ 監控{run ? "已停止" : "從未執行"}
+            {run ? ` — 最後執行：${fmtTime(run.at)}` : ""}
+            {run?.error ? `，錯誤：${run.error}` : ""}
+            <br />
+            止損、止盈、到價進場、補掛保護單都靠這個每分鐘的排程。
+            請確認 cron-job.org 的排程有在跑（設定頁有網址與密鑰）。
+          </div>
+        );
+      })()}
+
       <h2>目前持倉</h2>
       <div className="panel">
         {positions.length === 0 ? (

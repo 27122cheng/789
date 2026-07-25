@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { adminAuthMode, requireAdmin } from "@/lib/auth";
 import {
+  getMonitorRun,
   getOrders,
   getPositions,
   getSettings,
@@ -15,11 +16,12 @@ export async function GET(req: NextRequest) {
   const denied = await requireAdmin(req);
   if (denied) return denied;
 
-  const [settings, positions, signals, orders] = await Promise.all([
+  const [settings, positions, signals, orders, monitorRun] = await Promise.all([
     getSettings(),
     getPositions(),
     getSignals(),
     getOrders(),
+    getMonitorRun(),
   ]);
 
   const exchangeKeys =
@@ -32,6 +34,8 @@ export async function GET(req: NextRequest) {
     exchange: settings.exchange,
     liveTrading: settings.trading.liveTrading && exchangeKeys,
     trailingEnabled: settings.trading.trailing.enabled,
+    exchangeStops: settings.trading.orders.exchangeStops !== false,
+    monitorRun,
     durableStore: hasDurableStore(),
     configured: {
       telegramBot: !!settings.telegram.botToken,

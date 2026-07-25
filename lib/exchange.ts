@@ -69,4 +69,12 @@ export interface ExchangeClient {
   /** How many protective orders currently rest on the exchange, so the monitor
    *  can notice an unprotected position and place them. */
   countStopOrders?(venueSymbol: string): Promise<number>;
+
+  /** The positions the exchange actually holds. The exchange is the source of
+   *  truth: an order can fill while this app is not running, so the tracker
+   *  must be able to reconcile against reality rather than only against the
+   *  events it happened to observe. Quantities are in base-asset units. */
+  fetchPositions?(): Promise<
+    { symbol: string; side: "long" | "short"; qty: number; entryPrice: number }[]
+  >;
 }

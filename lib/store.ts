@@ -26,6 +26,7 @@ const K_ADMIN_HASH = KEY_PREFIX + "adminPasswordHash";
 const K_CRON_SECRET = KEY_PREFIX + "cronSecret";
 const K_WEBHOOK_EVENTS = KEY_PREFIX + "webhookEvents";
 const K_LISTENER = KEY_PREFIX + "listenerSession";
+const K_MONITOR = KEY_PREFIX + "monitorRun";
 
 // 10 pages x 10 rows in the UI; oldest entries beyond this are dropped
 const MAX_LOG = 100;
@@ -150,6 +151,25 @@ export async function purgeSymbolRecords(symbol: string): Promise<void> {
   await kvSet(K_SIGNALS, signals.filter((s) => s.symbol !== symbol));
   const orders = (await kvGet<OrderRecord[]>(K_ORDERS)) ?? [];
   await kvSet(K_ORDERS, orders.filter((o) => o.symbol !== symbol));
+}
+
+// ------------------------------------------------------- monitor heartbeat
+/** When the monitor last ran. Without this there is no way to tell a working
+ *  system from one whose cron stopped calling it - which looks identical from
+ *  the dashboard (nothing happens) but leaves positions unmanaged. */
+export interface MonitorRun {
+  at: number;
+  actionCount: number;
+  actions: string[];
+  error: string | null;
+}
+
+export async function setMonitorRun(run: MonitorRun): Promise<void> {
+  await kvSet(K_MONITOR, run);
+}
+
+export async function getMonitorRun(): Promise<MonitorRun | null> {
+  return await kvGet<MonitorRun>(K_MONITOR);
 }
 
 // ------------------------------------ listener login (Telethon) persistence

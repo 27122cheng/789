@@ -820,6 +820,30 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
       continue;
     }
 
+    // The exchange may have filled the entry while this app was not running -
+    // the monitor otherwise only learns of a fill by watching the order leave
+    // the book, which it cannot do during any gap. The exchange's own position
+    // is the source of truth, so adopt it and let this tick protect it.
+    if (pos.pendingEntry && live && !pos.dryRun && client.fetchPositions) {
+      const venue = client.perpSymbol(sym);
+      const real = (await client.fetchPositions().catch(() => []))
+        .find((p) => p.symbol === venue && p.qty > 0);
+      if (real) {
+        const target = pos.pendingEntry.target;
+        pos.entryPrice = real.entryPrice || target;
+        pos.qty = real.qty;
+        pos.originalQty = real.qty;
+        pos.initialRisk =
+          pos.stopLoss != null ? Math.abs(pos.entryPrice - pos.stopLoss) : null;
+        pos.pendingEntry = null;
+        changed = true;
+        actions.push(`${sym}: 交易所已有持倉，同步為已成交（${real.qty} @ ${pos.entryPrice}）`);
+        await record("open",
+          { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: real.qty, price: pos.entryPrice, leverage: pos.leverage },
+          true, true, `與交易所同步：持倉 ${real.qty} @ ${pos.entryPrice}`);
+      }
+    }
+
     // Not filled yet: either a real limit order rests on Pionex, or we watch
     // the price ourselves and market-enter on touch (到價進場).
     if (pos.pendingEntry) {
