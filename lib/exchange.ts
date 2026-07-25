@@ -77,6 +77,11 @@ export interface ExchangeClient {
    *  can notice an unprotected position and place them. */
   countStopOrders?(venueSymbol: string): Promise<number>;
 
+  /** Every protective order on the account, so ones left behind by a position
+   *  that no longer exists can be cleaned up. */
+  fetchAllStopOrders?(): Promise<{ symbol: string; algoId: string }[]>;
+  cancelStopOrderIds?(items: { symbol: string; algoId: string }[]): Promise<number>;
+
   /** The positions the exchange actually holds. The exchange is the source of
    *  truth: an order can fill while this app is not running, so the tracker
    *  must be able to reconcile against reality rather than only against the

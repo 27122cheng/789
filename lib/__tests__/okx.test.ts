@@ -232,3 +232,39 @@ describe("okx exchange-side stops", () => {
     expect(await c.placeStopOrders({ symbol: "BTC-USDT-SWAP", side: "SELL", size: "1" })).toEqual([]);
   });
 });
+
+describe("okx protective-order bookkeeping must not guess", () => {
+  function stubFail(failAlgoQuery: boolean, pending: any[] = []) {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (url.includes("/orders-algo-pending")) {
+        if (failAlgoQuery) {
+          return { ok: true, status: 200, json: async () => ({ code: "50011", msg: "rate limit", data: [] }) };
+        }
+        return { ok: true, status: 200, json: async () => ({ code: "0", data: pending }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data: [] }) };
+    }));
+  }
+
+  it("a failed lookup throws rather than reporting zero protection", async () => {
+    stubFail(true);
+    const c = new OkxClient("k", "s", "p");
+    // reporting 0 here would make the caller place a duplicate set every tick
+    await expect(c.countStopOrders("BTC-USDT-SWAP")).rejects.toThrow();
+    await expect(c.cancelStopOrders("BTC-USDT-SWAP")).rejects.toThrow();
+  });
+
+  it("counts what is actually resting", async () => {
+    stubFail(false, [{ algoId: "A-1", instId: "BTC-USDT-SWAP" }]);
+    const c = new OkxClient("k", "s", "p");
+    // one per ordType query (oco + conditional)
+    expect(await c.countStopOrders("BTC-USDT-SWAP")).toBe(2);
+  });
+
+  it("lists every protective order for orphan cleanup", async () => {
+    stubFail(false, [{ algoId: "A-9", instId: "SNX-USDT-SWAP" }]);
+    const c = new OkxClient("k", "s", "p");
+    const all = await c.fetchAllStopOrders();
+    expect(all[0]).toEqual({ symbol: "SNX-USDT-SWAP", algoId: "A-9" });
+  });
+});

@@ -1453,3 +1453,39 @@ describe("成交後止損改至 (deferred stop)", () => {
     expect(algos.filter((a) => a.slTriggerPx).pop().slTriggerPx).toBe("96045.0");
   });
 });
+
+describe("orphaned protective orders", () => {
+  it("cancels stop orders for symbols that are no longer held", async () => {
+    const cfg = settings();
+    cfg.exchange = "okx";
+    cfg.okx = { apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false };
+    cfg.trading.liveTrading = true;
+
+    const cancelled: any[] = [];
+    // SNX has three protective orders left behind; nothing is held anywhere
+    let algoPending: any[] = [
+      { algoId: "S-1", instId: "SNX-USDT-SWAP" },
+      { algoId: "S-2", instId: "SNX-USDT-SWAP" },
+      { algoId: "S-3", instId: "SNX-USDT-SWAP" },
+    ];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any[] = [];
+      if (url.includes("/account/config")) data = [{ posMode: "net_mode" }];
+      else if (url.includes("/public/instruments")) data = [];
+      else if (url.includes("/account/positions")) data = [];        // nothing held
+      else if (url.includes("/cancel-algos")) { cancelled.push(...body); algoPending = []; data = body; }
+      else if (url.includes("/orders-algo-pending")) data = algoPending;
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+
+    const actions = await monitorTick(cfg);
+    // each ordType query returns the list, so all of them get cancelled
+    expect(cancelled.map((c) => c.algoId)).toContain("S-1");
+    expect(cancelled.every((c) => c.instId === "SNX-USDT-SWAP")).toBe(true);
+    expect(actions.some((a) => a.includes("清理無持倉的殘留止盈止損單"))).toBe(true);
+    const rec = (await getOrders()).find((o) => o.message.includes("清理殘留保護單"));
+    expect(rec).toBeDefined();
+  });
+});

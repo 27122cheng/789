@@ -446,6 +446,9 @@ async function syncExchangeStops(
 
   const venue = client.perpSymbol(pos.symbol);
   try {
+    // If the existing orders cannot be enumerated and cancelled, placing more
+    // would stack a second set on top of live ones. Better to leave what is
+    // already there and report it than to duplicate protection.
     await client.cancelStopOrders(venue);
     if (pos.qty <= 0) return null;
     const sl = pos.stopLoss;
@@ -1459,6 +1462,40 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
       } else if (live && !pos.dryRun && client.cancelStopOrders) {
         await client.cancelStopOrders(client.perpSymbol(sym)).catch(() => {});
       }
+    }
+  }
+
+  // Protective orders outlive the position they were placed for when a close
+  // happens outside this app (manual close, liquidation, a stop firing). They
+  // are reduce-only so they cannot open anything, but they accumulate and make
+  // "is this position protected?" unanswerable. Remove the ones whose symbol is
+  // no longer held anywhere.
+  if (live && client.fetchAllStopOrders && client.cancelStopOrderIds && client.fetchPositions) {
+    try {
+      const [stops, held] = await Promise.all([
+        client.fetchAllStopOrders(),
+        client.fetchPositions(),
+      ]);
+      const heldSymbols = new Set(held.filter((h) => h.qty > 0).map((h) => h.symbol));
+      const trackedSymbols = new Set(
+        Object.values(positions)
+          .filter((p) => !p.dryRun)
+          .map((p) => client.perpSymbol(p.symbol))
+      );
+      const orphans = stops.filter(
+        (o) => !heldSymbols.has(o.symbol) && !trackedSymbols.has(o.symbol)
+      );
+      if (orphans.length) {
+        await client.cancelStopOrderIds(orphans);
+        const syms = [...new Set(orphans.map((o) => o.symbol))].join(", ");
+        actions.push(`清理無持倉的殘留止盈止損單 ${orphans.length} 筆（${syms}）`);
+        await record("stops_synced",
+          { symbol: syms.slice(0, 40), side: null, sizeUsdt: 0, qty: 0, price: null, leverage: 0 },
+          true, true,
+          `清理殘留保護單 ${orphans.length} 筆：${syms}（這些幣種已無持倉）`);
+      }
+    } catch {
+      /* enumeration failed - try again next tick rather than guess */
     }
   }
 

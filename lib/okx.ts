@@ -494,13 +494,31 @@ export class OkxClient implements ExchangeClient {
   }
 
   /** Pending algo (TP/SL) orders for a symbol. */
+  /** Pending algo (TP/SL) orders for a symbol.
+   *
+   *  Failures are NOT swallowed. Returning [] on a failed lookup makes "the
+   *  query broke" indistinguishable from "this position has no protection",
+   *  which makes the monitor place a fresh set every tick while the cancel step
+   *  removes nothing - orders pile up with no signal involved. */
   private async getAlgoOrders(instId: string): Promise<any[]> {
     const out: any[] = [];
     for (const ordType of ["oco", "conditional"]) {
       const rows = await this.request("GET", "/api/v5/trade/orders-algo-pending", {
         instId, ordType,
-      }).catch(() => []);
+      });
       out.push(...rows);
+    }
+    return out;
+  }
+
+  /** Every pending algo order on the account, for orphan cleanup. */
+  async fetchAllStopOrders(): Promise<{ symbol: string; algoId: string }[]> {
+    const out: { symbol: string; algoId: string }[] = [];
+    for (const ordType of ["oco", "conditional"]) {
+      const rows = await this.request("GET", "/api/v5/trade/orders-algo-pending", { ordType });
+      for (const r of rows) {
+        if (r?.algoId && r?.instId) out.push({ symbol: String(r.instId), algoId: String(r.algoId) });
+      }
     }
     return out;
   }
@@ -509,15 +527,25 @@ export class OkxClient implements ExchangeClient {
     return (await this.getAlgoOrders(instId)).length;
   }
 
+  /** Cancels the symbol's protective orders. Throws if they cannot be
+   *  enumerated or cancelled, so callers never place replacements on top of
+   *  orders that are still live. */
   async cancelStopOrders(instId: string): Promise<number> {
-    const orders = await this.getAlgoOrders(instId).catch(() => []);
+    const orders = await this.getAlgoOrders(instId);
     const ids = orders
       .map((o: any) => String(o.algoId ?? ""))
       .filter(Boolean)
       .map((algoId) => ({ algoId, instId }));
     if (!ids.length) return 0;
-    await this.request("POST", "/api/v5/trade/cancel-algos", {}, ids).catch(() => {});
+    await this.request("POST", "/api/v5/trade/cancel-algos", {}, ids);
     return ids.length;
+  }
+
+  async cancelStopOrderIds(items: { symbol: string; algoId: string }[]): Promise<number> {
+    if (!items.length) return 0;
+    await this.request("POST", "/api/v5/trade/cancel-algos", {},
+      items.map((i) => ({ algoId: i.algoId, instId: i.symbol })));
+    return items.length;
   }
 
   async cancelOrder(instId: string, orderId: string): Promise<unknown> {
