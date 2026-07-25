@@ -161,6 +161,12 @@ export interface Settings {
       mode: "fixed_usdt" | "percent_balance" | "signal";
       fixedUsdt: number;
       percentBalance: number;
+      // What the amount above MEANS:
+      //   "margin"   - it is the money committed; the position is
+      //                amount x leverage (10 USDT at 20x -> 200 USDT position)
+      //   "notional" - it is the position value itself, and leverage only
+      //                changes how much margin that ties up
+      basis: "margin" | "notional";
     };
     addPositionUsdt: number; // 加倉每次的名目 USDT，0 = 與主要 sizing 相同
     // 加倉位掛單前，價格需越過該價位持續的秒數（之後回踩到位才成交）
@@ -254,7 +260,12 @@ export const DEFAULT_SETTINGS: Settings = {
   },
   trading: {
     liveTrading: false,
-    sizing: { mode: "fixed_usdt", fixedUsdt: 100, percentBalance: 5 },
+    sizing: {
+      mode: "fixed_usdt",
+      fixedUsdt: 100,
+      percentBalance: 5,
+      basis: "margin",
+    },
     addPositionUsdt: 0,
     addArmSeconds: 60,
     leverage: { default: 10, max: 20, whenUnspecified: "max" },

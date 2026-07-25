@@ -29,6 +29,7 @@ export default function SettingsPage() {
   const [sizingMode, setSizingMode] = useState("fixed_usdt");
   const [fixedUsdt, setFixedUsdt] = useState(100);
   const [percentBalance, setPercentBalance] = useState(5);
+  const [sizingBasis, setSizingBasis] = useState("margin");
   const [addPositionUsdt, setAddPositionUsdt] = useState(0);
   const [levDefault, setLevDefault] = useState(10);
   const [levMax, setLevMax] = useState(20);
@@ -83,6 +84,7 @@ export default function SettingsPage() {
     setSizingMode(s.trading.sizing.mode);
     setFixedUsdt(s.trading.sizing.fixedUsdt);
     setPercentBalance(s.trading.sizing.percentBalance);
+    setSizingBasis(s.trading.sizing.basis ?? "margin");
     setAddPositionUsdt(s.trading.addPositionUsdt ?? 0);
     setLevDefault(s.trading.leverage.default);
     setLevMax(s.trading.leverage.max);
@@ -143,6 +145,7 @@ export default function SettingsPage() {
             mode: sizingMode,
             fixedUsdt: Number(fixedUsdt),
             percentBalance: Number(percentBalance),
+            basis: sizingBasis,
           },
           addPositionUsdt: Number(addPositionUsdt),
           leverage: {
@@ -352,6 +355,37 @@ export default function SettingsPage() {
           <div>
             <label>餘額百分比 (%)</label>
             <input type="number" value={percentBalance} onChange={(e) => setPercentBalance(+e.target.value)} />
+          </div>
+        </div>
+        <div className="row">
+          <div>
+            <label>金額的意義</label>
+            <select value={sizingBasis} onChange={(e) => setSizingBasis(e.target.value)}>
+              <option value="margin">保證金（會再乘上槓桿）</option>
+              <option value="notional">倉位名目金額（槓桿只影響佔用保證金）</option>
+            </select>
+          </div>
+          <div style={{ display: "flex", alignItems: "flex-end" }}>
+            <p className="hint" style={{ margin: 0 }}>
+              {sizingBasis === "margin" ? (
+                <>
+                  目前設定 = 投入 <b>{fixedUsdt}</b> USDT 保證金，
+                  以 {levWhenUnspecified === "max" ? levMax : levDefault}x 開出約{" "}
+                  <b>{(Number(fixedUsdt) || 0) *
+                      (levWhenUnspecified === "max" ? Number(levMax) : Number(levDefault))}</b>{" "}
+                  USDT 的倉位。
+                </>
+              ) : (
+                <>
+                  目前設定 = 開出 <b>{fixedUsdt}</b> USDT 的倉位，
+                  以 {levWhenUnspecified === "max" ? levMax : levDefault}x 只佔用約{" "}
+                  <b>{((Number(fixedUsdt) || 0) /
+                      (levWhenUnspecified === "max" ? Number(levMax) || 1 : Number(levDefault) || 1)
+                     ).toFixed(2)}</b>{" "}
+                  USDT 保證金。
+                </>
+              )}
+            </p>
           </div>
         </div>
         <div className="row3">

@@ -256,7 +256,7 @@ describe("dry-run pipeline", () => {
     cfg.trading.liveTrading = true;
     cfg.trading.risk.cooldownSeconds = 0;
     cfg.trading.orders.entryType = "market";
-    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 600, percentBalance: 5 };
+    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 600, percentBalance: 5, basis: "notional" };
 
     const orders: any[] = [];
     vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
@@ -596,7 +596,7 @@ describe("minimum order size policy", () => {
     cfg.trading.risk.cooldownSeconds = 0;
     cfg.trading.orders.entryType = "market";
     // 3 USDT at 60000 = 0.00005 BTC, below the 0.0001 BTC minimum
-    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 3, percentBalance: 5 };
+    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 3, percentBalance: 5, basis: "notional" };
     return cfg;
   }
   function stub(orders: any[]) {
@@ -649,7 +649,7 @@ describe("size step rounding", () => {
     cfg.trading.risk.cooldownSeconds = 0;
     cfg.trading.orders.entryType = "market";
     // 10 USDT at 64000: 0.00015625 BTC, floored to the 0.0001 step = 6.40 USDT
-    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 10, percentBalance: 5 };
+    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 10, percentBalance: 5, basis: "notional" };
 
     const orders: any[] = [];
     vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
@@ -685,7 +685,7 @@ describe("exchange-side stops", () => {
     cfg.trading.risk.cooldownSeconds = 0;
     cfg.trading.orders.entryType = "market";
     cfg.trading.orders.exchangeStops = true;
-    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 600, percentBalance: 5 };
+    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 600, percentBalance: 5, basis: "notional" };
 
     const algos: any[] = [];
     const cancels: any[] = [];
@@ -783,7 +783,7 @@ describe("self-healing exchange stops", () => {
     cfg.trading.risk.maxOpenPositions = 50;
     cfg.trading.orders.entryType = "market";
     cfg.trading.orders.exchangeStops = false;   // opened before the feature
-    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 600, percentBalance: 5 };
+    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 600, percentBalance: 5, basis: "notional" };
 
     const algos: any[] = [];
     vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
@@ -832,7 +832,7 @@ describe("reconciling with the exchange", () => {
     cfg.trading.risk.cooldownSeconds = 0;
     cfg.trading.risk.maxOpenPositions = 50;
     cfg.trading.orders.entryType = "limit";
-    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 600, percentBalance: 5 };
+    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 600, percentBalance: 5, basis: "notional" };
 
     let exchangePositions: any[] = [];
     const algos: any[] = [];
@@ -883,7 +883,7 @@ describe("TP/SL attached to the entry order", () => {
     cfg.trading.risk.cooldownSeconds = 0;
     cfg.trading.risk.maxOpenPositions = 50;
     cfg.trading.orders.entryType = "market";
-    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 600, percentBalance: 5 };
+    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 600, percentBalance: 5, basis: "notional" };
     return cfg;
   }
   function stub(orders: any[], algos: any[], instId: string, opts: { rejectAttach?: boolean } = {}) {
@@ -958,7 +958,7 @@ describe("加倉確認 tranche", () => {
     cfg.trading.risk.maxOpenPositions = 50;
     cfg.trading.orders.entryType = "market";
     cfg.trading.addPositionUsdt = 600;
-    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 600, percentBalance: 5 };
+    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 600, percentBalance: 5, basis: "notional" };
 
     const orders: any[] = [];
     let openOrders: any[] = [];
@@ -1031,7 +1031,7 @@ describe("never stack a second position on the same symbol", () => {
     cfg.trading.risk.cooldownSeconds = 0;
     cfg.trading.risk.maxOpenPositions = 50;
     cfg.trading.orders.entryType = "market";
-    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 600, percentBalance: 5 };
+    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 600, percentBalance: 5, basis: "notional" };
     return cfg;
   }
   function stub(orders: any[], instId: string, held: any[]) {
@@ -1082,5 +1082,47 @@ describe("never stack a second position on the same symbol", () => {
     const rec = (await getOrders()).find((o) => o.symbol === "TIAUSDT");
     expect(rec!.success).toBe(false);
     expect(rec!.message).toContain("方向衝突");
+  });
+});
+
+describe("sizing basis", () => {
+  it("margin basis multiplies the amount by the leverage", async () => {
+    const cfg = settings();
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.risk.maxOpenPositions = 50;
+    cfg.trading.leverage = { default: 10, max: 20, whenUnspecified: "max" };
+    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 10, percentBalance: 5, basis: "margin" };
+
+    await handleIncomingMessage("RUNEUSDT LONG Entry: 100 SL: 95", meta(), cfg);
+    const pos = (await getPositions())["RUNEUSDT"];
+    // 10 USDT margin at 20x -> a 200 USDT position -> 2 coins at 100
+    expect(pos.leverage).toBe(20);
+    expect(pos.sizeUsdt).toBe(200);
+    expect(pos.qty).toBeCloseTo(2, 6);
+  });
+
+  it("notional basis takes the amount as the position value", async () => {
+    const cfg = settings();
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.risk.maxOpenPositions = 50;
+    cfg.trading.leverage = { default: 10, max: 20, whenUnspecified: "max" };
+    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 10, percentBalance: 5, basis: "notional" };
+
+    await handleIncomingMessage("LDOUSDT LONG Entry: 100 SL: 95", meta(), cfg);
+    const pos = (await getPositions())["LDOUSDT"];
+    expect(pos.sizeUsdt).toBe(10);
+    expect(pos.qty).toBeCloseTo(0.1, 6);
+  });
+
+  it("a signal-specified amount is taken at face value", async () => {
+    const cfg = settings();
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.risk.maxOpenPositions = 50;
+    cfg.trading.leverage = { default: 10, max: 20, whenUnspecified: "max" };
+    cfg.trading.sizing = { mode: "signal", fixedUsdt: 10, percentBalance: 5, basis: "margin" };
+
+    await handleIncomingMessage("GMXUSDT LONG Entry: 100 SL: 95 倉位 50 USDT", meta(), cfg);
+    const pos = (await getPositions())["GMXUSDT"];
+    expect(pos.sizeUsdt).toBe(50);
   });
 });

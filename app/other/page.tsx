@@ -130,7 +130,15 @@ export default function OtherPage() {
                 <tbody>
                   <tr><td>交易所合約</td><td className="mono">{sizeResult.venueSymbol}</td></tr>
                   <tr><td>現價</td><td className="mono">{sizeResult.price}</td></tr>
-                  <tr><td>你輸入的金額</td><td className="mono">{sizeResult.requestedUsdt} USDT</td></tr>
+                  <tr>
+                    <td>你輸入的金額</td>
+                    <td className="mono">
+                      {sizeResult.requestedUsdt} USDT
+                      {sizeResult.basis === "margin"
+                        ? `（保證金 × ${sizeResult.leverage}x = 目標倉位 ${sizeResult.targetNotionalUsdt} USDT）`
+                        : "（倉位名目金額）"}
+                    </td>
+                  </tr>
                   <tr>
                     <td>交易所最低下單量</td>
                     <td className="mono">
@@ -168,6 +176,7 @@ export default function OtherPage() {
                       </b>
                     </td>
                   </tr>
+                  <tr><td>佔用保證金</td><td className="mono">{sizeResult.marginUsdt} USDT</td></tr>
                   <tr><td>結果</td><td>{sizeResult.outcome}</td></tr>
                 </tbody>
               </table>

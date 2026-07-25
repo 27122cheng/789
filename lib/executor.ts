@@ -95,27 +95,39 @@ async function record(
 }
 
 // ------------------------------------------------------------------ sizing
+/**
+ * The POSITION VALUE (notional) to open, in USDT.
+ *
+ * The configured amount is normally the margin committed, so the position is
+ * that amount times the leverage - 10 USDT at 20x opens a 200 USDT position.
+ * Set basis "notional" to have the amount mean the position value itself, with
+ * leverage only affecting how much margin it ties up.
+ */
 async function computeSizeUsdt(
   settings: Settings,
   signal: ParsedSignal,
   client: ExchangeClient,
   live: boolean,
-  forAdd: boolean
+  forAdd: boolean,
+  leverage: number
 ): Promise<number> {
-  if (forAdd && settings.trading.addPositionUsdt > 0) {
-    return signal.sizeUsdt ?? settings.trading.addPositionUsdt;
-  }
   const sizing = settings.trading.sizing;
+  const lev = sizing.basis === "notional" ? 1 : Math.max(1, leverage);
+
+  if (forAdd && settings.trading.addPositionUsdt > 0) {
+    return (signal.sizeUsdt ?? settings.trading.addPositionUsdt) * lev;
+  }
   if (sizing.mode === "signal" && signal.sizeUsdt && signal.sizeUsdt > 0) {
+    // an amount named by the signal is taken at face value
     return signal.sizeUsdt;
   }
   if (sizing.mode === "percent_balance") {
-    if (!live) return sizing.fixedUsdt; // no balance to query in dry-run
+    if (!live) return sizing.fixedUsdt * lev; // no balance to query in dry-run
     const balance = await client.getAvailableUsdt();
     if (balance <= 0) throw new Error(`available balance is ${balance}`);
-    return (balance * sizing.percentBalance) / 100;
+    return ((balance * sizing.percentBalance) / 100) * lev;
   }
-  return sizing.fixedUsdt;
+  return sizing.fixedUsdt * lev;
 }
 
 function computeLeverage(settings: Settings, signal: ParsedSignal): number {
@@ -566,7 +578,7 @@ export async function executeSignal(
           return; // incomplete signal (no direction) - drop silently
         }
         const leverage = computeLeverage(settings, signal);
-        const sizeUsdt = await computeSizeUsdt(settings, signal, client, live, false);
+        const sizeUsdt = await computeSizeUsdt(settings, signal, client, live, false, leverage);
         // align signal prices to Pionex precision: entry/SL up, TP down
         const aligned = await alignPrices(client, sym, {
           entry: signal.entryPrice,
@@ -750,7 +762,7 @@ export async function executeSignal(
 
       case "add": {
         const p = pos!;
-        const sizeUsdt = await computeSizeUsdt(settings, signal, client, live, true);
+        const sizeUsdt = await computeSizeUsdt(settings, signal, client, live, true, p.leverage);
         const refPrice = await fetchPriceSafe(client, sym, signal.entryPrice ?? p.entryPrice);
         const addLive = live && !p.dryRun;
 

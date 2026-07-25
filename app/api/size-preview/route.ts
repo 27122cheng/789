@@ -28,6 +28,7 @@ export async function GET(req: NextRequest) {
     .toUpperCase()
     .replace(/[^A-Z0-9]/g, "");
   const usdt = Number(url.searchParams.get("usdt") || "0");
+  const levParam = Number(url.searchParams.get("lev") || "0");
   if (!symbol || !Number.isFinite(usdt) || usdt <= 0) {
     return NextResponse.json({ error: "請提供幣種與大於 0 的 USDT 金額" }, { status: 400 });
   }
@@ -44,6 +45,18 @@ export async function GET(req: NextRequest) {
           settings.pionex.baseUrl, settings.pionex.symbolFormat
         );
 
+  // the entered amount means margin unless configured otherwise, so the actual
+  // position is that amount times the leverage
+  const levCfg = settings.trading.leverage;
+  const leverage =
+    levParam > 0
+      ? levParam
+      : levCfg.whenUnspecified === "default"
+      ? levCfg.default
+      : levCfg.max;
+  const basis = settings.trading.sizing.basis ?? "margin";
+  const notionalUsdt = basis === "margin" ? usdt * Math.max(1, leverage) : usdt;
+
   const venueSymbol = client.perpSymbol(symbol);
   try {
     const [price, filters] = await Promise.all([
@@ -53,7 +66,7 @@ export async function GET(req: NextRequest) {
 
     const baseDec = filters.baseDecimals ?? 6;
     const minSize = filters.minSizeMarket ?? filters.minSizeLimit;
-    const wantQty = floorToDecimals(usdt / price, baseDec);
+    const wantQty = floorToDecimals(notionalUsdt / price, baseDec);
 
     const lifted = !!(minSize && wantQty < minSize);
     const finalQty = lifted ? minSize! : wantQty;
@@ -63,7 +76,7 @@ export async function GET(req: NextRequest) {
     // is worth several USDT, so the configured amount is rarely reachable
     const step = Math.pow(10, -baseDec);
     const stepNotional = step * price;
-    const roundedDown = !lifted && finalNotional < usdt * 0.98;
+    const roundedDown = !lifted && finalNotional < notionalUsdt * 0.98;
 
     return NextResponse.json({
       exchange: settings.exchange,
@@ -71,6 +84,11 @@ export async function GET(req: NextRequest) {
       venueSymbol,
       price,
       requestedUsdt: usdt,
+      basis,
+      leverage,
+      // what the entered amount actually becomes as a position
+      targetNotionalUsdt: +notionalUsdt.toFixed(4),
+      marginUsdt: +(finalQty * price / Math.max(1, leverage)).toFixed(4),
       minSizeBase: minSize,
       minNotionalUsdt: minSize != null ? +(minSize * price).toFixed(4) : null,
       finalQtyBase: finalQty,
@@ -79,8 +97,8 @@ export async function GET(req: NextRequest) {
       stepNotionalUsdt: +stepNotional.toFixed(4),
       // the amounts actually reachable around what was asked for
       reachableUsdt: [
-        +(Math.floor(usdt / stepNotional) * stepNotional).toFixed(2),
-        +((Math.floor(usdt / stepNotional) + 1) * stepNotional).toFixed(2),
+        +(Math.floor(notionalUsdt / stepNotional) * stepNotional).toFixed(2),
+        +((Math.floor(notionalUsdt / stepNotional) + 1) * stepNotional).toFixed(2),
       ].filter((v) => v > 0),
       roundedDown,
       orderUnit: client.describeOrderSize
