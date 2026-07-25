@@ -1391,3 +1391,65 @@ describe("an untracked resting order also blocks a new entry", () => {
     expect(rec!.message).toContain("未下任何單");
   });
 });
+
+describe("成交後止損改至 (deferred stop)", () => {
+  it("holds the live stop while resting, and moves it only on the fill", async () => {
+    const cfg = settings();
+    cfg.exchange = "okx";
+    cfg.okx = { apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false };
+    cfg.trading.liveTrading = true;
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.risk.maxOpenPositions = 50;
+    cfg.trading.orders.entryType = "market";
+    cfg.trading.addPositionUsdt = 600;
+    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 600, percentBalance: 5, basis: "notional" };
+
+    const orders: any[] = [];
+    const algos: any[] = [];
+    let resting: any[] = [];
+    let placed = false;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any[] = [];
+      if (url.includes("/account/config")) data = [{ posMode: "net_mode" }];
+      else if (url.includes("/public/instruments")) {
+        data = [{ instId: "WIF-USDT-SWAP", ctVal: "0.1", lotSz: "0.1", minSz: "0.1", tickSz: "0.1" }];
+      } else if (url.includes("/market/ticker")) data = [{ last: "96800" }];
+      else if (url.includes("/account/positions")) data = [];
+      else if (url.includes("/orders-algo-pending")) data = [];
+      else if (url.includes("orders-pending")) data = placed ? resting : [];
+      else if (url.includes("/order-algo")) { algos.push(body); data = [{ algoId: "A-1", sCode: "0" }]; }
+      else if (url.includes("algo")) data = [{ algoId: "A-1", sCode: "0" }];
+      else if (url.includes("/trade/order")) { placed = true; orders.push(body); data = [{ ordId: "W-1", sCode: "0" }]; }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+
+    await handleIncomingMessage("WIFUSDT LONG Entry: 95100 SL: 94150 TP1: 99000", meta(), cfg);
+    expect((await getPositions())["WIFUSDT"].stopLoss).toBe(94150);
+
+    await handleIncomingMessage(
+      `📌 加倉確認 #1｜請掛單 — WIF ▲ 做多
+🎯 掛限價單於：$96800（回踩此價成交）
+🛑 成交後止損改至：$96045（現行 $94150 → 成交後）
+整倉共用一個止損，加倉不另設`,
+      meta(), cfg
+    );
+
+    // still resting: the live stop is untouched, and the order carries it
+    const pos1 = (await getPositions())["WIFUSDT"];
+    expect(pos1.stopLoss).toBe(94150);
+    const limit = orders.find((o) => o.ordType === "limit");
+    expect(limit.px).toBe("96800.0");
+    expect(limit.attachAlgoOrds[0].slTriggerPx).toBe("94150.0");
+    expect(pos1.pendingAdds[0].stopLossAfterFill).toBe(96045);
+
+    // filled -> the deferred stop becomes live for the whole position
+    resting = [];
+    await monitorTick(cfg);
+    const pos2 = (await getPositions())["WIFUSDT"];
+    expect(pos2.addCount).toBe(1);
+    expect(pos2.stopLoss).toBe(96045);
+    expect(algos.filter((a) => a.slTriggerPx).pop().slTriggerPx).toBe("96045.0");
+  });
+});

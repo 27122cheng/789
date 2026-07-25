@@ -274,3 +274,29 @@ describe("加倉確認 with one shared stop (current provider format)", () => {
     expect(s.stopLoss).toBe(3100);
   });
 });
+
+describe("加倉確認 with a deferred stop (real message)", () => {
+  const msg = `📌 加倉確認 #1｜請掛單 — BTC ▲ 做多
+✅ 價格已站上加倉點上方並持續 2 分鐘，確認非假突破
+🎯 掛限價單於：$96800（回踩此價成交）
+🛑 成交後止損改至：$96045（現行 $94150 → 成交後）
+整倉共用一個止損，加倉不另設
+📌 主倉進場：$95100
+⏰ 07/25 上午03:12
+#btc #long #加倉掛單`;
+
+  it("reads the tranche limit price", () => {
+    const s = parseSignal(msg, meta)!;
+    expect(s.action).toBe("add");
+    expect(s.symbol).toBe("BTCUSDT");
+    expect(s.side).toBe("long");
+    expect(s.entryPrice).toBe(96800);
+  });
+
+  it("keeps the LIVE stop as the current one, not the after-fill level", () => {
+    const s = parseSignal(msg, meta)!;
+    // 現行 $94150 is live now; 96045 must not be armed before the fill
+    expect(s.stopLoss).toBe(94150);
+    expect(s.stopLossAfterFill).toBe(96045);
+  });
+});

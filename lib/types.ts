@@ -17,6 +17,10 @@ export interface ParsedSignal {
   entryPriceHigh: number | null;
   takeProfits: number[];
   stopLoss: number | null;
+  // 「成交後止損改至 X」on an add: applies only when that tranche FILLS, never
+  // before - arming it early could close the position at a level that was not
+  // meant to be live yet.
+  stopLossAfterFill: number | null;
   stopLossBreakeven: boolean;   // "移至保本/成本" style update_sl
   sizeUsdt: number | null;
   addLevels: number[];          // 加倉計劃 price levels from long-term signals
@@ -42,7 +46,9 @@ export interface PendingAdd {
   orderId?: string | null;
   qty?: number;            // base quantity submitted with that order
   sizeUsdt?: number;       // notional it represents
-  stopLoss?: number | null; // the tranche's own stop
+  stopLoss?: number | null; // the stop this order was placed with
+  // the stop the whole position moves to once this tranche fills
+  stopLossAfterFill?: number | null;
   // true when that stop/target rode along on the order itself, so the tranche
   // is already protected and must not be flattened into the main position's
   // levels when it fills

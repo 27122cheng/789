@@ -808,6 +808,11 @@ export async function executeSignal(
             entry: signal.entryPrice,
             stopLoss: signal.stopLoss,
           });
+          // 「成交後止損改至 X」only takes effect when the tranche fills, so it is
+          // carried on the pending add rather than applied now.
+          const afterFill = (
+            await alignPrices(client, sym, { stopLoss: signal.stopLossAfterFill })
+          ).stopLoss;
           const stopChanged =
             alignedAdd.stopLoss != null && alignedAdd.stopLoss !== p.stopLoss;
           if (alignedAdd.stopLoss != null) p.stopLoss = alignedAdd.stopLoss;
@@ -828,7 +833,8 @@ export async function executeSignal(
               orderId: r.orderIds[0] ?? null,
               qty: r.qty,
               sizeUsdt,
-              stopLoss: signal.stopLoss ?? null,
+              stopLoss: p.stopLoss,
+              stopLossAfterFill: afterFill,
               attached: r.attached,
             },
           ];
@@ -845,7 +851,8 @@ export async function executeSignal(
               (r.attached
                 ? `，已附帶止損 ${p.stopLoss ?? "-"}／止盈 ${p.takeProfits[0] ?? "-"}（與主倉相同）`
                 : "") +
-              (stopChanged ? `；主倉止損同步更新為 ${p.stopLoss}` : "；主倉止損不變") +
+              (stopChanged ? `；止損同步更新為 ${p.stopLoss}` : "；止損維持 " + (p.stopLoss ?? "-")) +
+              (afterFill != null ? `；成交後將改為 ${afterFill}` : "") +
               (addSyncNote ? `；${addSyncNote}` : ""),
             r.orderIds);
           return;
@@ -1242,7 +1249,13 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
           pos.sizeUsdt += add.sizeUsdt ?? 0;
           pos.addCount += 1;
           changed = true;
-          actions.push(`${sym}: 加倉限價單成交 @ ${add.level}`);
+          // the deferred stop becomes live exactly now, for the whole position
+          const moved = add.stopLossAfterFill != null && add.stopLossAfterFill !== pos.stopLoss;
+          if (add.stopLossAfterFill != null) pos.stopLoss = add.stopLossAfterFill;
+          actions.push(
+            `${sym}: 加倉限價單成交 @ ${add.level}` +
+              (moved ? `，止損改至 ${pos.stopLoss}` : "")
+          );
           // The tranche's own attached stop covers the WAIT between placing the
           // order and it filling. Once filled the provider sends 止損上移 for
           // the whole position, and that update replaces every resting order -
@@ -1254,6 +1267,7 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
             { symbol: sym, side: pos.side, sizeUsdt: add.sizeUsdt ?? 0, qty: addQty, price: add.level, leverage: pos.leverage },
             true, true,
             `加倉限價單成交 @ ${add.level}（第 ${pos.addCount} 次）` +
+              (moved ? `；整倉止損改至 ${pos.stopLoss}` : "") +
               (note ? `；${note}` : ""),
             [String(add.orderId)]);
         }

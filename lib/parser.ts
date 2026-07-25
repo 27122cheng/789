@@ -85,6 +85,24 @@ function extractAddLimit(norm: string): number | null {
   return m ? parseFloat(m[1]) : null;
 }
 
+/** 「成交後止損改至：$96045」- takes effect only once the tranche FILLS.
+ *  Applying it as the live stop would arm a level that is not meant to be
+ *  active yet and could close the whole position before the add ever happens. */
+function extractStopAfterFill(norm: string): number | null {
+  const m = norm.match(
+    /成交後[^\d\n]{0,12}(?:止損|止损)[^\d\n]{0,12}\$?\s*([0-9]*\.?[0-9]+)/
+  );
+  return m ? parseFloat(m[1]) : null;
+}
+
+/** 「（現行 $94150 → ...）」- the stop that is live right now. */
+function extractCurrentStop(norm: string): number | null {
+  const m = norm.match(
+    /(?:現行|现行)[^\d\n]{0,8}\$?\s*([0-9]*\.?[0-9]+)/
+  );
+  return m ? parseFloat(m[1]) : null;
+}
+
 /** 「主倉止損：$99」- the stop for the WHOLE position. Authoritative whenever the
  *  message spells it out separately from a per-tranche number. */
 function extractMainStop(norm: string): number | null {
@@ -385,14 +403,19 @@ export function parseSignal(
   const addLimit = action === "add" ? extractAddLimit(norm) : null;
   // An add runs on the position's stop. Prefer 主倉止損 when the message states
   // it separately; otherwise the single stop it quotes IS the position's stop.
-  const addStop =
+  const addStopAfterFill = action === "add" ? extractStopAfterFill(norm) : null;
+  let addStop =
     action === "add"
-      ? extractMainStop(norm) ??
+      ? extractCurrentStop(norm) ??
+        extractMainStop(norm) ??
         extractTrancheStop(norm) ??
         // loose: the label and the number can be separated by wording such as
         // 「止損（主倉與加倉相同）：$3100」
         extractStopLoss(norm, true)
       : null;
+  // Never let the after-fill level be read as the live one - that is the whole
+  // point of it being deferred.
+  if (addStopAfterFill != null && addStop === addStopAfterFill) addStop = null;
 
   const stopLoss =
     action === "update_sl"
@@ -410,6 +433,7 @@ export function parseSignal(
     entryPriceHigh: addLimit != null ? null : entry.high,
     takeProfits,
     stopLoss,
+    stopLossAfterFill: addStopAfterFill,
     stopLossBreakeven: breakeven,
     sizeUsdt: extractSize(norm),
     addLevels: action === "open" ? extractAddLevels(norm) : [],
