@@ -166,7 +166,8 @@ describe("dry-run pipeline", () => {
         data = { tickers: [{ close: String(price) }] };
       } else if (url.includes("/trade/openOrders")) {
         data = { orders: openOrders };
-      } else if (url.includes("/trade/order")) {
+      } else if (url.includes("orders-pending")) data = [];
+      else if (url.includes("/trade/order")) {
         placed.push(body);
         data = { orderId: "OID-1" };
       }
@@ -221,7 +222,8 @@ describe("dry-run pipeline", () => {
         data = { tickers: [{ close: String(price) }] };
       } else if (url.includes("/market/klines")) {
         data = { klines: [{ time: Date.now(), high: price, low }] };
-      } else if (url.includes("/trade/order")) {
+      } else if (url.includes("orders-pending")) data = [];
+      else if (url.includes("/trade/order")) {
         // Pionex's price filter refuses the resting LIMIT order (the real
         // TRADE_PRICE_FILTER_DENIED case) -> falls back to watch mode;
         // MARKET orders still go through.
@@ -270,7 +272,8 @@ describe("dry-run pipeline", () => {
         data = [{ lever: "10" }];
       } else if (url.includes("algo")) {
         data = [];
-      } else if (url.includes("/trade/order")) {
+      } else if (url.includes("orders-pending")) data = [];
+      else if (url.includes("/trade/order")) {
         orders.push(body);
         data = [{ ordId: "OKX-1", sCode: "0" }];
       }
@@ -609,6 +612,7 @@ describe("minimum order size policy", () => {
         data = [{ instId: "BTC-USDT-SWAP", ctVal: "0.01", lotSz: "0.01", minSz: "0.01", tickSz: "0.1" }];
       } else if (url.includes("/market/ticker")) data = [{ last: "60000" }];
       else if (url.includes("algo")) data = [];
+      else if (url.includes("orders-pending")) data = [];
       else if (url.includes("/trade/order")) { orders.push(body); data = [{ ordId: "M-1", sCode: "0" }]; }
       return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
     }));
@@ -661,6 +665,7 @@ describe("size step rounding", () => {
         data = [{ instId: "AVAX-USDT-SWAP", ctVal: "0.01", lotSz: "0.01", minSz: "0.01", tickSz: "0.1" }];
       } else if (url.includes("/market/ticker")) data = [{ last: "64000" }];
       else if (url.includes("algo")) data = [];
+      else if (url.includes("orders-pending")) data = [];
       else if (url.includes("/trade/order")) { orders.push(body); data = [{ ordId: "S-1", sCode: "0" }]; }
       return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
     }));
@@ -700,6 +705,7 @@ describe("exchange-side stops", () => {
       else if (url.includes("/orders-algo-pending")) data = algos.length ? [{ algoId: "A-1" }] : [];
       else if (url.includes("/cancel-algos")) { cancels.push(body); data = [{ algoId: "A-1" }]; }
       else if (url.includes("/order-algo")) { algos.push(body); data = [{ algoId: "A-1", sCode: "0" }]; }
+      else if (url.includes("orders-pending")) data = [];
       else if (url.includes("/trade/order")) data = [{ ordId: "T-1", sCode: "0" }];
       return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
     }));
@@ -797,6 +803,7 @@ describe("self-healing exchange stops", () => {
       else if (url.includes("/orders-algo-pending")) data = algos.length ? [{ algoId: "A-9" }] : [];
       else if (url.includes("/cancel-algos")) data = [{ algoId: "A-9" }];
       else if (url.includes("/order-algo")) { algos.push(body); data = [{ algoId: "A-9", sCode: "0" }]; }
+      else if (url.includes("orders-pending")) data = [];
       else if (url.includes("/trade/order")) data = [{ ordId: "W-1", sCode: "0" }];
       return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
     }));
@@ -836,6 +843,7 @@ describe("reconciling with the exchange", () => {
     cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 600, percentBalance: 5, basis: "notional" };
 
     let exchangePositions: any[] = [];
+    let placed = false;   // nothing rests until we actually place the entry
     const algos: any[] = [];
     vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
       const body = init?.body ? JSON.parse(init.body) : null;
@@ -847,8 +855,8 @@ describe("reconciling with the exchange", () => {
       else if (url.includes("/account/positions")) data = exchangePositions;
       else if (url.includes("/orders-algo-pending")) data = algos.length ? [{ algoId: "A-3" }] : [];
       else if (url.includes("/order-algo")) { algos.push(body); data = [{ algoId: "A-3", sCode: "0" }]; }
-      else if (url.includes("/trade/orders-pending")) data = [{ ordId: "P-1" }];
-      else if (url.includes("/trade/order")) data = [{ ordId: "P-1", sCode: "0" }];
+      else if (url.includes("/trade/orders-pending")) data = placed ? [{ ordId: "P-1" }] : [];
+      else if (url.includes("/trade/order")) { placed = true; data = [{ ordId: "P-1", sCode: "0" }]; }
       return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
     }));
 
@@ -898,6 +906,7 @@ describe("TP/SL attached to the entry order", () => {
       else if (url.includes("/account/positions")) data = [];
       else if (url.includes("/orders-algo-pending")) data = [];
       else if (url.includes("/order-algo")) { algos.push(body); data = [{ algoId: "A-7", sCode: "0" }]; }
+      else if (url.includes("orders-pending")) data = [];
       else if (url.includes("/trade/order")) {
         if (opts.rejectAttach && body?.attachAlgoOrds) {
           return { ok: true, status: 200, json: async () => ({
@@ -1056,6 +1065,7 @@ describe("never stack a second position on the same symbol", () => {
       else if (url.includes("/account/positions")) data = held;
       else if (url.includes("/orders-algo-pending")) data = [];
       else if (url.includes("algo")) data = [{ algoId: "A-1", sCode: "0" }];
+      else if (url.includes("orders-pending")) data = [];
       else if (url.includes("/trade/order")) { orders.push(body); data = [{ ordId: "X-1", sCode: "0" }]; }
       return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
     }));
@@ -1339,5 +1349,45 @@ describe("an add runs on the same stop as the main position", () => {
     );
     expect((await getPositions())["SEIBUSDT"].stopLoss).toBe(101.8);
     expect(algos.filter((a) => a.slTriggerPx).pop().slTriggerPx).toBe("101.8");
+  });
+});
+
+describe("an untracked resting order also blocks a new entry", () => {
+  it("refuses to open when the exchange already has a pending order for the symbol", async () => {
+    const cfg = settings();
+    cfg.exchange = "okx";
+    cfg.okx = { apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false };
+    cfg.trading.liveTrading = true;
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.risk.maxOpenPositions = 50;
+    cfg.trading.orders.entryType = "market";
+    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 600, percentBalance: 5, basis: "notional" };
+
+    const orders: any[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any[] = [];
+      if (url.includes("/account/config")) data = [{ posMode: "net_mode" }];
+      else if (url.includes("/public/instruments")) {
+        data = [{ instId: "JASMY-USDT-SWAP", ctVal: "1", lotSz: "1", minSz: "1", tickSz: "0.0001" }];
+      } else if (url.includes("/market/ticker")) data = [{ last: "100" }];
+      else if (url.includes("/account/positions")) data = [];       // no position…
+      else if (url.includes("/orders-algo-pending")) data = [];
+      // …but an order is resting that this system never recorded
+      else if (url.includes("orders-pending")) data = [{ ordId: "ORPHAN-1" }];
+      else if (url.includes("algo")) data = [{ algoId: "A-1", sCode: "0" }];
+      else if (url.includes("/trade/order")) { orders.push(body); data = [{ ordId: "N-1", sCode: "0" }]; }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+
+    await handleIncomingMessage("JASMYUSDT LONG Entry: 100 SL: 95 TP1: 110", meta(), cfg);
+
+    expect(orders).toHaveLength(0);                       // nothing was sent
+    expect((await getPositions())["JASMYUSDT"]).toBeUndefined();
+    const rec = (await getOrders()).find((o) => o.symbol === "JASMYUSDT");
+    expect(rec!.success).toBe(false);
+    expect(rec!.message).toContain("已有 1 筆");
+    expect(rec!.message).toContain("未下任何單");
   });
 });

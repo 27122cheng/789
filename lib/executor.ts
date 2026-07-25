@@ -632,10 +632,27 @@ export async function executeSignal(
         // out of sync with reality - records cleared, KV reset, a position
         // opened by hand, or a close that silently failed - and the exchange is
         // the only authority on what is actually held.
-        if (live && client.fetchPositions) {
+        if (live) {
           const venue = client.perpSymbol(sym);
-          const held = (await client.fetchPositions().catch(() => []))
-            .find((p) => p.symbol === venue && p.qty > 0);
+
+          // A resting order counts too: it is a position waiting to happen, so
+          // placing another would leave two orders that can BOTH fill. The
+          // tracker blocks its own duplicates, so anything found here is
+          // unknown to it - orphaned by cleared records, or placed by hand.
+          const working = await client.getOpenOrders(venue).catch(() => []);
+          if (working.length) {
+            await record("open",
+              { symbol: sym, side: signal.side, sizeUsdt, qty: 0, price: aligned.entry, leverage },
+              live, false,
+              `交易所已有 ${working.length} 筆 ${sym} 掛單（本系統未追蹤），` +
+                `為避免重複進場已略過，未下任何單。請先到交易所確認或撤銷該掛單`);
+            return;
+          }
+
+          const held = client.fetchPositions
+            ? (await client.fetchPositions().catch(() => []))
+                .find((p) => p.symbol === venue && p.qty > 0)
+            : undefined;
           if (held) {
             if (held.side !== signal.side) {
               // opposite direction: opening would hedge or flip the position,
