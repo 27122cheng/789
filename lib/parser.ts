@@ -58,6 +58,22 @@ const MOVE_VERBS = [
  *  full price structure (掛限價單於 / 此筆止損 / 主倉進場 / 主倉止損), so they must
  *  be classified as an add BEFORE the generic "entry + SL = open" rule, and the
  *  tranche's own prices must be read rather than the main position's. */
+/** 加倉掛單失效: the tranche's limit order timed out. Pull that ORDER only -
+ *  the position itself is untouched. */
+const ADD_CANCEL_MARKERS =
+  /(加倉|加仓)(掛單|挂单)?\s*失效|(撤|取消)\s*(加倉|加仓)(掛單|挂单)/;
+
+/** 加倉確認通知: the tranche FILLED and the stop moves up. This is a stop
+ *  update, not another order to place - and it contains "加倉確認", so it must
+ *  be matched before the 請掛單 rule below. */
+const ADD_FILLED_MARKERS =
+  /(加倉|加仓)(確認|确认)通知|(止損|止损)\s*上移/;
+
+/** 加倉訊號: the level is announced but the 2-minute hold is NOT confirmed yet.
+ *  Acting here would enter on a fake breakout, so it is recorded and no more. */
+const ADD_PLAN_MARKERS =
+  /(加倉|加仓)(訊號|讯号|信號|信号)/;
+
 const ADD_CONFIRM_MARKERS =
   /加倉確認|加仓确认|加倉單|加仓单|加倉\s*#|加仓\s*#|(請|请)掛單|(請|请)挂单/;
 
@@ -308,15 +324,22 @@ export function parseSignal(
       norm
     );
 
-  if (findKeyword(CANCEL_KEYWORDS, lower) >= 0) {
+  if (ADD_CANCEL_MARKERS.test(norm)) {
+    action = "add_cancel";
+  } else if (ADD_FILLED_MARKERS.test(norm) && findKeyword(ADD_KEYWORDS, lower) >= 0) {
+    action = "update_sl";
+  } else if (findKeyword(CANCEL_KEYWORDS, lower) >= 0) {
     action = "cancel";
   } else if (SL_ADJUST_MARKERS.test(norm)) {
     action = "update_sl";
   } else if (CLOSED_MARKERS.test(norm)) {
     action = "close";
   } else if (ADD_CONFIRM_MARKERS.test(norm) && findKeyword(ADD_KEYWORDS, lower) >= 0) {
-    // 加倉確認: an add tranche, despite carrying entry+stop wording
+    // 加倉確認｜請掛單: an add tranche, despite carrying entry+stop wording
     action = "add";
+  } else if (ADD_PLAN_MARKERS.test(norm)) {
+    // 加倉訊號: announced, not yet confirmed - do not trade on it
+    action = "add_plan";
   } else if (hasEntry && (hasSl || hasTp)) {
     // full signal structure (entry + SL/TP) -> a fresh open, even if the
     // message also mentions 加倉計劃 levels or trailing-stop advice text
@@ -357,7 +380,7 @@ export function parseSignal(
     action === "update_sl"
       ? extractStopLoss(norm, true)
       : action === "add"
-      ? trancheStop
+      ? trancheStop ?? strictSl
       : strictSl;
 
   return {

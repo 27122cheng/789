@@ -1,6 +1,8 @@
 export type SignalAction =
   | "open"       // 建單 / 開倉
-  | "add"        // 加倉
+  | "add"        // 加倉確認｜請掛單 -> rest the tranche order
+  | "add_plan"   // 加倉訊號 -> announced only; the breakout is NOT confirmed yet
+  | "add_cancel" // 加倉掛單失效 -> pull the resting tranche order, keep the position
   | "close"      // 平倉
   | "cancel"     // 取消掛單
   | "update_sl"  // 移動/修改止損

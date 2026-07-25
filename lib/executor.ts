@@ -242,8 +242,18 @@ function riskReject(
     return `signal is ${Math.round(ageSec)}s old (max ${risk.maxSignalAgeSeconds}s)`;
 
   const last = cooldowns[sym];
-  if (last && (Date.now() - last) / 1000 < risk.cooldownSeconds)
+  if (
+    signal.action === "open" &&
+    last &&
+    (Date.now() - last) / 1000 < risk.cooldownSeconds
+  ) {
+    // The cooldown exists to stop a symbol being re-entered immediately after
+    // it closed, so it applies to opens only. Adds are authorised steps in the
+    // provider's own sequence, and management signals (stop moves, fills,
+    // cancels, closes) must always get through - a blocked stop update is a
+    // risk, not a duplicate. Re-delivery is already handled by dedup.
     return `cooldown active for ${sym}`;
+  }
 
   if (signal.action === "open") {
     if (positions[sym]) return `position already open for ${sym}`;
@@ -825,14 +835,46 @@ export async function executeSignal(
         p.addCount += 1;
         await savePositions(positions);
         await setCooldown(sym, Date.now());
-        const addStopNote = res.attached
-          ? "已附帶止盈止損"
-          : await syncExchangeStops(client, settings, live, p);
+        const addStopNote = await syncExchangeStops(client, settings, live, p);
         await record("add",
           { symbol: sym, side: p.side, sizeUsdt, qty: res.qty, price: res.price, leverage: p.leverage },
           live && !p.dryRun, true,
           `added to position (${p.addCount}x); ${res.note}` + (addStopNote ? `；${addStopNote}` : ""),
           res.orderIds);
+        return;
+      }
+
+      case "add_plan": {
+        // 加倉訊號: the level is announced but the 2-minute hold that rules out a
+        // fake breakout has not happened yet. The 加倉確認｜請掛單 message is
+        // what authorises the order, so nothing is placed here.
+        await record("add_plan",
+          { symbol: sym, side: pos?.side ?? signal.side, sizeUsdt: 0, qty: 0, price: signal.entryPrice, leverage: pos?.leverage ?? 0 },
+          live, true,
+          `加倉訊號已收到${signal.entryPrice ? `（加倉價位 ${signal.entryPrice}` : "（"}` +
+            `${signal.stopLoss ? `，預計止損 ${signal.stopLoss}` : ""}）` +
+            "；等「加倉確認｜請掛單」才會掛單");
+        return;
+      }
+
+      case "add_cancel": {
+        // 加倉掛單失效: pull the tranche's resting order. The POSITION stays -
+        // only the unfilled add is withdrawn.
+        if (!pos) return;
+        const resting = (pos.pendingAdds ?? []).filter((a) => a.orderId);
+        if (live && !pos.dryRun) {
+          for (const a of resting) {
+            await client.cancelOrder(client.perpSymbol(sym), String(a.orderId)).catch(() => {});
+          }
+        }
+        pos.pendingAdds = (pos.pendingAdds ?? []).filter((a) => !a.orderId);
+        await savePositions(positions);
+        await record("add_cancel",
+          { symbol: sym, side: pos.side, sizeUsdt: 0, qty: 0, price: resting[0]?.level ?? null, leverage: pos.leverage },
+          live && !pos.dryRun, true,
+          resting.length
+            ? `加倉掛單失效 → 已撤銷 ${resting.length} 張加倉掛單（持倉不變）`
+            : "加倉掛單失效 → 沒有待成交的加倉掛單，持倉不變");
         return;
       }
 
@@ -1170,12 +1212,13 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
           pos.addCount += 1;
           changed = true;
           actions.push(`${sym}: 加倉限價單成交 @ ${add.level}`);
-          // A tranche that carried its own attached stop/target is already
-          // protected at ITS level; re-syncing would replace that with the main
-          // position's stop and silently discard the tranche's own.
-          const note = add.attached
-            ? `此筆已附帶止損 ${add.stopLoss ?? "-"}，保留不覆蓋`
-            : await syncExchangeStops(client, settings, live, pos);
+          // The tranche's own attached stop covers the WAIT between placing the
+          // order and it filling. Once filled the provider sends 止損上移 for
+          // the whole position, and that update replaces every resting order -
+          // so protection is re-placed here for the full size. Keeping only the
+          // tranche's stop would leave the rest uncovered the moment the update
+          // arrived.
+          const note = await syncExchangeStops(client, settings, live, pos);
           await record("add",
             { symbol: sym, side: pos.side, sizeUsdt: add.sizeUsdt ?? 0, qty: addQty, price: add.level, leverage: pos.leverage },
             true, true,

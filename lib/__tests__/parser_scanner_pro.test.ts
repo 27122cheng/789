@@ -202,3 +202,48 @@ describe("長線單 加倉確認 (tranche limit order)", () => {
     expect(sig.stopLoss).toBe(101.5);      // 此筆止損, not 主倉止損 99
   });
 });
+
+describe("完整加倉通知序列 (four message types)", () => {
+  it("➕ 加倉訊號: announced only, must NOT place an order", () => {
+    const s = parseSignal(
+      `➕ 加倉訊號 #1 — BTC ▲ 做多\n加倉價位：$103\n預計止損：$101.5`,
+      meta
+    )!;
+    expect(s.action).toBe("add_plan");
+    expect(s.symbol).toBe("BTCUSDT");
+  });
+
+  it("📌 加倉確認｜請掛單: places the tranche order", () => {
+    const s = parseSignal(
+      `📌 加倉確認 #1｜請掛單 — BTC ▲ 做多\n🎯 掛限價單於：$103\n🛑 此筆止損：$101.5`,
+      meta
+    )!;
+    expect(s.action).toBe("add");
+    expect(s.entryPrice).toBe(103);
+    expect(s.stopLoss).toBe(101.5);
+  });
+
+  it("📈 加倉確認通知: a fill report that moves the stop, not a new order", () => {
+    const s = parseSignal(
+      `📈 加倉確認通知 #1 — BTC ▲ 做多\n成交價：$103\n🔧 止損上移至：$101.8`,
+      meta
+    )!;
+    expect(s.action).toBe("update_sl");
+    expect(s.stopLoss).toBe(101.8);
+  });
+
+  it("⏹ 加倉掛單失效: cancels that order only", () => {
+    const s = parseSignal(`⏹ 加倉掛單失效 #1 — BTC ▲ 做多\n請撤單`, meta)!;
+    expect(s.action).toBe("add_cancel");
+    expect(s.symbol).toBe("BTCUSDT");
+  });
+
+  it("🔧 止損調整 (3/3 保本位保護) is still an ordinary stop move", () => {
+    const s = parseSignal(
+      `🔧 止損調整 — BTC ▲ 做多\n保本位保護\n新止損：$100.2`,
+      meta
+    )!;
+    expect(s.action).toBe("update_sl");
+    expect(s.stopLoss).toBe(100.2);
+  });
+});

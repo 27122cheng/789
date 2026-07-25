@@ -1020,11 +1020,11 @@ describe("加倉確認 tranche", () => {
     expect(pos.addCount).toBe(1);
     expect(pos.entryPrice).toBeGreaterThan(100);   // averaged up toward 103
     expect(pos.stopLoss).toBe(99);                 // main stop still untouched
-    // the tranche keeps its own attached stop rather than being flattened to 99
+    // once filled, protection is re-placed for the FULL position size
     const fillRec = (await getOrders()).find(
       (o) => o.symbol === "ARBUSDT" && o.message.includes("加倉限價單成交")
     );
-    expect(fillRec!.message).toContain("保留不覆蓋");
+    expect(fillRec!.message).toContain("交易所止盈止損已掛");
   });
 });
 
@@ -1133,5 +1133,93 @@ describe("sizing basis", () => {
     await handleIncomingMessage("GMXUSDT LONG Entry: 100 SL: 95 倉位 50 USDT", meta(), cfg);
     const pos = (await getPositions())["GMXUSDT"];
     expect(pos.sizeUsdt).toBe(50);
+  });
+});
+
+describe("加倉 notification sequence end-to-end", () => {
+  function stubOkx(orders: any[], cancels: any[], instId: string, openOrders: () => any[]) {
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any[] = [];
+      if (url.includes("/account/config")) data = [{ posMode: "net_mode" }];
+      else if (url.includes("/public/instruments")) {
+        data = [{ instId, ctVal: "0.1", lotSz: "0.1", minSz: "0.1", tickSz: "0.1" }];
+      } else if (url.includes("/market/ticker")) data = [{ last: "100" }];
+      else if (url.includes("/account/positions")) data = [];
+      else if (url.includes("/orders-algo-pending")) data = [];
+      else if (url.includes("/trade/orders-pending")) data = openOrders();
+      else if (url.includes("/cancel-order")) { cancels.push(body); data = [{ ordId: body.ordId }]; }
+      else if (url.includes("algo")) data = [{ algoId: "A-1", sCode: "0" }];
+      else if (url.includes("/trade/order")) { orders.push(body); data = [{ ordId: "AD-1", sCode: "0" }]; }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+  }
+  function cfgFor() {
+    const cfg = settings();
+    cfg.exchange = "okx";
+    cfg.okx = { apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false };
+    cfg.trading.liveTrading = true;
+    cfg.trading.risk.cooldownSeconds = 30;   // must not block management signals
+    cfg.trading.risk.maxOpenPositions = 50;
+    cfg.trading.orders.entryType = "market";
+    cfg.trading.addPositionUsdt = 600;
+    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 600, percentBalance: 5, basis: "notional" };
+    return cfg;
+  }
+
+  it("加倉訊號 places nothing; 請掛單 places; 掛單失效 cancels only that order", async () => {
+    const cfg = cfgFor();
+    const orders: any[] = [];
+    const cancels: any[] = [];
+    let resting: any[] = [];
+    stubOkx(orders, cancels, "ENA-USDT-SWAP", () => resting);
+
+    await handleIncomingMessage("ENAUSDT LONG Entry: 100 SL: 99 TP1: 110", meta(), cfg);
+    const entryOrders = orders.length;
+    expect((await getPositions())["ENAUSDT"]).toBeDefined();
+
+    // ① announced only -> nothing placed, even though it names a price+stop
+    await handleIncomingMessage(
+      "➕ 加倉訊號 #1 — ENA ▲ 做多\n加倉價位：$103\n預計止損：$101.5", meta(), cfg
+    );
+    expect(orders).toHaveLength(entryOrders);
+    expect((await getPositions())["ENAUSDT"].pendingAdds).toHaveLength(0);
+    const planRec = (await getOrders()).find((o) => o.action === "add_plan");
+    expect(planRec!.message).toContain("等「加倉確認｜請掛單」");
+
+    // ② confirmed -> the tranche order goes out, despite the cooldown
+    await handleIncomingMessage(
+      "📌 加倉確認 #1｜請掛單 — ENA ▲ 做多\n🎯 掛限價單於：$103\n🛑 此筆止損：$101.5",
+      meta(), cfg
+    );
+    const pos = (await getPositions())["ENAUSDT"];
+    expect(pos.pendingAdds).toHaveLength(1);
+    expect(orders.length).toBe(entryOrders + 1);
+
+    // ④ timed out -> that order is cancelled and the POSITION survives
+    resting = [{ ordId: "AD-1" }];
+    await handleIncomingMessage("⏹ 加倉掛單失效 #1 — ENA ▲ 做多\n請撤單", meta(), cfg);
+    expect(cancels.map((c) => c.ordId)).toContain("AD-1");
+    const after = (await getPositions())["ENAUSDT"];
+    expect(after).toBeDefined();                 // position NOT closed
+    expect(after.pendingAdds).toHaveLength(0);
+    expect(after.qty).toBeGreaterThan(0);
+  });
+
+  it("加倉確認通知 moves the stop through, even inside the cooldown", async () => {
+    const cfg = cfgFor();
+    const orders: any[] = [];
+    const cancels: any[] = [];
+    stubOkx(orders, cancels, "AAVE-USDT-SWAP", () => []);
+
+    await handleIncomingMessage("AAVEUSDT LONG Entry: 100 SL: 99 TP1: 110", meta(), cfg);
+    expect((await getPositions())["AAVEUSDT"].stopLoss).toBe(99);
+
+    await handleIncomingMessage(
+      "📈 加倉確認通知 #1 — AAVE ▲ 做多\n成交價：$103\n🔧 止損上移至：$101.8",
+      meta(), cfg
+    );
+    expect((await getPositions())["AAVEUSDT"].stopLoss).toBe(101.8);
   });
 });
