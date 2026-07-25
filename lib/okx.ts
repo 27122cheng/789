@@ -436,6 +436,10 @@ export class OkxClient implements ExchangeClient {
     return out;
   }
 
+  async countStopOrders(instId: string): Promise<number> {
+    return (await this.getAlgoOrders(instId)).length;
+  }
+
   async cancelStopOrders(instId: string): Promise<number> {
     const orders = await this.getAlgoOrders(instId).catch(() => []);
     const ids = orders

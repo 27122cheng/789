@@ -66,4 +66,7 @@ export interface ExchangeClient {
     takeProfits?: { price: number; size: string }[];
   }): Promise<string[]>;
   cancelStopOrders?(venueSymbol: string): Promise<number>;
+  /** How many protective orders currently rest on the exchange, so the monitor
+   *  can notice an unprotected position and place them. */
+  countStopOrders?(venueSymbol: string): Promise<number>;
 }

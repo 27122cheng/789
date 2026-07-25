@@ -769,3 +769,53 @@ describe("追蹤止損 signal", () => {
     expect(rec!.success).toBe(true);
   });
 });
+
+describe("self-healing exchange stops", () => {
+  it("places protection on the next tick for a position that has none", async () => {
+    const cfg = settings();
+    cfg.exchange = "okx";
+    cfg.okx = {
+      apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false,
+    };
+    cfg.trading.liveTrading = true;
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.risk.maxOpenPositions = 50;
+    cfg.trading.orders.entryType = "market";
+    cfg.trading.orders.exchangeStops = false;   // opened before the feature
+    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 600, percentBalance: 5 };
+
+    const algos: any[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any[] = [];
+      if (url.includes("/account/config")) data = [{ posMode: "net_mode" }];
+      else if (url.includes("/public/instruments")) {
+        data = [{ instId: "WLD-USDT-SWAP", ctVal: "0.1", lotSz: "0.1", minSz: "0.1", tickSz: "0.0001" }];
+      } else if (url.includes("/market/ticker")) data = [{ last: "3000" }];
+      else if (url.includes("/orders-algo-pending")) data = algos.length ? [{ algoId: "A-9" }] : [];
+      else if (url.includes("/cancel-algos")) data = [{ algoId: "A-9" }];
+      else if (url.includes("/order-algo")) { algos.push(body); data = [{ algoId: "A-9", sCode: "0" }]; }
+      else if (url.includes("/trade/order")) data = [{ ordId: "W-1", sCode: "0" }];
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+
+    await handleIncomingMessage("WLDUSDT SHORT Entry: 3000 SL: 3100 TP1: 2900", meta(), cfg);
+    expect((await getPositions())["WLDUSDT"]).toBeDefined();
+    expect(algos).toHaveLength(0);   // feature was off at entry -> unprotected
+
+    // turn it on: the very next monitor tick notices and protects the position
+    cfg.trading.orders.exchangeStops = true;
+    await monitorTick(cfg);
+    expect(algos).toHaveLength(1);
+    expect(algos[0].instId).toBe("WLD-USDT-SWAP");
+    expect(algos[0].side).toBe("buy");            // closing side of a short
+    expect(algos[0].slTriggerPx).toBe("3100.0000");
+    const rec = (await getOrders()).find((o) => o.action === "stops_synced");
+    expect(rec!.message).toContain("補掛保護單");
+
+    // already protected -> no duplicate on the following tick
+    await monitorTick(cfg);
+    expect(algos).toHaveLength(1);
+  });
+});

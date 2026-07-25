@@ -72,7 +72,13 @@ export interface Position {
 
 export interface OrderRecord {
   at: number;
-  action: SignalAction | "tp_hit" | "sl_hit" | "trailing_move" | "upgrade";
+  action:
+    | SignalAction
+    | "tp_hit"
+    | "sl_hit"
+    | "trailing_move"
+    | "upgrade"
+    | "stops_synced";   // protective TP/SL (re)placed on the exchange
   symbol: string;
   side: string | null;
   sizeUsdt: number;

@@ -914,6 +914,28 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
     // be re-placed for the remaining size before this tick ends
     let sizeShrunk = false;
 
+    // Self-heal: protective orders are otherwise only placed when something
+    // happens (fill, SL change, partial close), so a position that was opened
+    // before this feature existed - or whose orders failed, were cancelled by
+    // hand, or expired - would sit unprotected forever. Check every tick and
+    // place them if the exchange has none.
+    if (
+      settings.trading.orders.exchangeStops &&
+      live && !pos.dryRun && pos.qty > 0 &&
+      client.countStopOrders && client.placeStopOrders
+    ) {
+      const existing = await client.countStopOrders(client.perpSymbol(sym)).catch(() => -1);
+      if (existing === 0) {
+        const note = await syncExchangeStops(client, settings, live, pos);
+        if (note) {
+          actions.push(`${sym}: ${note}`);
+          await record("stops_synced",
+            { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: pos.qty, price: pos.stopLoss, leverage: pos.leverage },
+            true, !note.startsWith("⚠️"), `補掛保護單：${note}`);
+        }
+      }
+    }
+
     // trailing stop: once profit exceeds the activation threshold, keep the
     // SL at callbackPercent behind the best price seen (ratchet only).
     const trailing = settings.trading.trailing;
