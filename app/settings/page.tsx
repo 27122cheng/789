@@ -32,6 +32,7 @@ export default function SettingsPage() {
   const [addPositionUsdt, setAddPositionUsdt] = useState(0);
   const [levDefault, setLevDefault] = useState(10);
   const [levMax, setLevMax] = useState(20);
+  const [levWhenUnspecified, setLevWhenUnspecified] = useState("max");
   const [whitelist, setWhitelist] = useState("");
   const [blacklist, setBlacklist] = useState("");
   const [maxOpenPositions, setMaxOpenPositions] = useState(5);
@@ -85,6 +86,7 @@ export default function SettingsPage() {
     setAddPositionUsdt(s.trading.addPositionUsdt ?? 0);
     setLevDefault(s.trading.leverage.default);
     setLevMax(s.trading.leverage.max);
+    setLevWhenUnspecified(s.trading.leverage.whenUnspecified ?? "max");
     setWhitelist((s.trading.risk.symbolWhitelist ?? []).join(", "));
     setBlacklist((s.trading.risk.symbolBlacklist ?? []).join(", "));
     setMaxOpenPositions(s.trading.risk.maxOpenPositions);
@@ -143,7 +145,10 @@ export default function SettingsPage() {
             percentBalance: Number(percentBalance),
           },
           addPositionUsdt: Number(addPositionUsdt),
-          leverage: { default: Number(levDefault), max: Number(levMax) },
+          leverage: {
+            default: Number(levDefault), max: Number(levMax),
+            whenUnspecified: levWhenUnspecified,
+          },
           risk: {
             symbolWhitelist: splitList(whitelist).map((s) => s.toUpperCase()),
             symbolBlacklist: splitList(blacklist).map((s) => s.toUpperCase()),
@@ -362,7 +367,19 @@ export default function SettingsPage() {
             <label>槓桿上限</label>
             <input type="number" value={levMax} onChange={(e) => setLevMax(+e.target.value)} />
           </div>
+          <div>
+            <label>信號沒指定槓桿時</label>
+            <select value={levWhenUnspecified}
+                    onChange={(e) => setLevWhenUnspecified(e.target.value)}>
+              <option value="max">用槓桿上限</option>
+              <option value="default">用預設槓桿</option>
+            </select>
+          </div>
         </div>
+        <p className="hint">
+          加密掃描 Pro 的信號通常不寫槓桿。信號有寫就照它（仍受槓桿上限限制），
+          沒寫就依上面的選擇 —— 預設是直接用槓桿上限。
+        </p>
         <div className="row">
           <div>
             <label>進場單類型</label>

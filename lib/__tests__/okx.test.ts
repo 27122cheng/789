@@ -194,7 +194,7 @@ describe("okx exchange-side stops", () => {
     const c = new OkxClient("k", "s", "p");
     const ids = await c.placeStopOrders({
       symbol: "BTC-USDT-SWAP", side: "SELL", size: "0.5",
-      stopLoss: 59000, takeProfit: 65000,
+      stopLoss: 59000, takeProfits: [{ price: 65000, size: "0.5" }],
     });
     expect(ids).toEqual(["A-1"]);
     expect(captured[0].ordType).toBe("oco");

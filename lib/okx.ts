@@ -170,8 +170,9 @@ export class OkxClient implements ExchangeClient {
     }
   }
 
-  /** Contracts for a base-asset quantity, snapped down to the lot step. */
-  private szFromBase(info: any, baseQty: number): string {
+  /** Contracts for a base-asset quantity, snapped DOWN to the lot step and not
+   *  lifted - so callers can tell "too small to place" from a valid size. */
+  private contractsFor(info: any, baseQty: number): number {
     const ctVal = Number(info?.ctVal);
     const lotSz = Number(info?.lotSz);
     if (!Number.isFinite(ctVal) || ctVal <= 0) {
@@ -181,12 +182,22 @@ export class OkxClient implements ExchangeClient {
         `OKX 缺少 ${info?.instId ?? "此合約"} 的合約面值 (ctVal)，無法換算張數`
       );
     }
-    let contracts = baseQty / ctVal;
-    if (Number.isFinite(lotSz) && lotSz > 0) contracts = floorToStep(contracts, lotSz);
+    const contracts = baseQty / ctVal;
+    return Number.isFinite(lotSz) && lotSz > 0
+      ? floorToStep(contracts, lotSz)
+      : contracts;
+  }
+
+  private lotDecimals(info: any): number {
+    return (info?.lotSz != null ? decimalsOf(info.lotSz) : 0) ?? 0;
+  }
+
+  /** Contracts for a base quantity, lifted to the venue minimum, formatted. */
+  private szFromBase(info: any, baseQty: number): string {
+    let contracts = this.contractsFor(info, baseQty);
     const minSz = Number(info?.minSz);
     if (Number.isFinite(minSz) && minSz > 0 && contracts < minSz) contracts = minSz;
-    const dec = (Number.isFinite(lotSz) ? decimalsOf(info.lotSz) : 0) ?? 0;
-    return contracts.toFixed(dec);
+    return contracts.toFixed(this.lotDecimals(info));
   }
 
   async pricePrecision(symbol: string): Promise<number | null> {
@@ -335,43 +346,82 @@ export class OkxClient implements ExchangeClient {
     side: "BUY" | "SELL";
     size: string;
     stopLoss?: number | null;
-    takeProfit?: number | null;
+    takeProfits?: { price: number; size: string }[];
   }): Promise<string[]> {
     const hasSl = opts.stopLoss != null && opts.stopLoss > 0;
-    const hasTp = opts.takeProfit != null && opts.takeProfit > 0;
-    if (!hasSl && !hasTp) return [];
+    const tps = (opts.takeProfits ?? []).filter((t) => t.price > 0);
+    if (!hasSl && !tps.length) return [];
     const info = await this.infoFor(opts.symbol);
     if (!info) throw new OkxApiError(`OKX 找不到合約 ${opts.symbol}`);
 
     const dec = decimalsOf(info.tickSz) ?? 8;
-    const body: Record<string, unknown> = {
+    const lotDec = this.lotDecimals(info);
+    const minSz = Number(info.minSz) || 0;
+    const hedge = (await this.posMode()) === "long_short_mode";
+    // these orders only ever REDUCE the position
+    const scope: Record<string, unknown> = hedge
+      ? { posSide: opts.side === "SELL" ? "long" : "short" }
+      : { reduceOnly: true };
+    const base = {
       instId: opts.symbol,
       tdMode: this.tdMode,
       side: opts.side.toLowerCase(),
-      ordType: hasSl && hasTp ? "oco" : "conditional",
-      sz: this.szFromBase(info, Number(opts.size ?? 0)),
+      ...scope,
     };
-    if (hasSl) {
-      body.slTriggerPx = opts.stopLoss!.toFixed(dec);
-      body.slOrdPx = "-1";           // market on trigger
-    }
-    if (hasTp) {
-      body.tpTriggerPx = opts.takeProfit!.toFixed(dec);
-      body.tpOrdPx = "-1";
-    }
-    // same position-mode rules as a normal order: these always REDUCE
-    if ((await this.posMode()) === "long_short_mode") {
-      body.posSide = opts.side === "SELL" ? "long" : "short";
-    } else {
-      body.reduceOnly = true;
+
+    const send = async (body: Record<string, unknown>): Promise<string | null> => {
+      const rows = await this.request("POST", "/api/v5/trade/order-algo", {}, body);
+      const first = rows[0] ?? {};
+      if (first.sCode !== undefined && String(first.sCode) !== "0") {
+        throw new OkxApiError(`OKX API error (${first.sCode}): ${first.sMsg ?? ""}`, String(first.sCode), first);
+      }
+      return first.algoId ? String(first.algoId) : null;
+    };
+
+    // Single target + stop: one OCO, where triggering either cancels the other.
+    if (hasSl && tps.length === 1) {
+      const id = await send({
+        ...base,
+        ordType: "oco",
+        sz: this.szFromBase(info, Number(opts.size ?? 0)),
+        slTriggerPx: opts.stopLoss!.toFixed(dec),
+        slOrdPx: "-1",                  // close at market on trigger
+        tpTriggerPx: tps[0].price.toFixed(dec),
+        tpOrdPx: "-1",
+      });
+      return id ? [id] : [];
     }
 
-    const rows = await this.request("POST", "/api/v5/trade/order-algo", {}, body);
-    const first = rows[0] ?? {};
-    if (first.sCode !== undefined && String(first.sCode) !== "0") {
-      throw new OkxApiError(`OKX API error (${first.sCode}): ${first.sMsg ?? ""}`, String(first.sCode), first);
+    // 分批止盈: OCO can only pair ONE target with the stop, so split targets get
+    // their own conditional orders and the stop covers the whole remainder
+    // (it is reduce-only, so it can never close more than is actually open).
+    const ids: string[] = [];
+    if (hasSl) {
+      const id = await send({
+        ...base,
+        ordType: "conditional",
+        sz: this.szFromBase(info, Number(opts.size ?? 0)),
+        slTriggerPx: opts.stopLoss!.toFixed(dec),
+        slOrdPx: "-1",
+      });
+      if (id) ids.push(id);
     }
-    return first.algoId ? [String(first.algoId)] : [];
+    for (const tp of tps) {
+      // a slice below the venue minimum cannot be placed; skip it rather than
+      // rounding up, which would close more of the position than intended -
+      // the monitor still takes that target.
+      const contracts = this.contractsFor(info, Number(tp.size));
+      if (contracts <= 0 || (minSz > 0 && contracts < minSz)) continue;
+      const id = await send({
+        ...base,
+        ordType: "conditional",
+        sz: contracts.toFixed(lotDec),
+        tpTriggerPx: tp.price.toFixed(dec),
+        tpOrdPx: "-1",
+      });
+      if (id) ids.push(id);
+    }
+    return ids;
   }
 
   /** Pending algo (TP/SL) orders for a symbol. */

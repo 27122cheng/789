@@ -119,8 +119,12 @@ async function computeSizeUsdt(
 }
 
 function computeLeverage(settings: Settings, signal: ParsedSignal): number {
-  const lev = signal.leverage ?? settings.trading.leverage.default;
-  return Math.min(Math.max(lev, 1), settings.trading.leverage.max);
+  const cfg = settings.trading.leverage;
+  // Signals from 加密掃描 Pro usually omit leverage; which value to fall back
+  // to is configurable, defaulting to the maximum.
+  const fallback = cfg.whenUnspecified === "default" ? cfg.default : cfg.max;
+  const lev = signal.leverage ?? fallback;
+  return Math.min(Math.max(lev, 1), cfg.max);
 }
 
 async function fetchPriceSafe(
@@ -344,7 +348,38 @@ async function placeEntry(
 }
 
 /**
- * Mirror the position's stop-loss / first take-profit onto the exchange as
+ * How the remaining position is divided across its take-profit targets - the
+ * same rule the monitor applies, so the exchange orders and the monitor agree:
+ * with 分批止盈 on, each target closes an equal share of the ORIGINAL size and
+ * the last one closes whatever is left; with it off, the first target closes
+ * everything.
+ */
+function tpSlices(
+  settings: Settings,
+  pos: Position
+): { price: number; size: number }[] {
+  const tps = pos.takeProfits ?? [];
+  if (!tps.length || pos.qty <= 0) return [];
+  if (settings.trading.orders.splitTakeProfit === false) {
+    return [{ price: tps[0], size: pos.qty }];
+  }
+  const share =
+    pos.tpCountOriginal > 0 ? pos.originalQty / pos.tpCountOriginal : pos.qty;
+  const out: { price: number; size: number }[] = [];
+  let left = pos.qty;
+  tps.forEach((price, i) => {
+    if (left <= 0) return;
+    const size = i === tps.length - 1 ? left : Math.min(left, share);
+    if (size > 0) {
+      out.push({ price, size });
+      left -= size;
+    }
+  });
+  return out;
+}
+
+/**
+ * Mirror the position's stop-loss and take-profit targets onto the exchange as
  * resting orders, so it is protected even if this app stops running.
  *
  * Cancel-and-replace, because the levels and the remaining size both move
@@ -367,16 +402,19 @@ async function syncExchangeStops(
     await client.cancelStopOrders(venue);
     if (pos.qty <= 0) return null;
     const sl = pos.stopLoss;
-    const tp = pos.takeProfits[0] ?? null;
-    if (sl == null && tp == null) return null;
+    const takeProfits = tpSlices(settings, pos);
+    if (sl == null && !takeProfits.length) return null;
     const ids = await client.placeStopOrders({
       symbol: venue,
       side: pos.side === "long" ? "SELL" : "BUY", // closing side
       size: String(pos.qty),
       stopLoss: sl,
-      takeProfit: tp,
+      takeProfits: takeProfits.map((t) => ({ price: t.price, size: String(t.size) })),
     });
-    return `交易所止盈止損已掛（SL ${sl ?? "-"} / TP ${tp ?? "-"}${ids.length ? `, id ${ids[0]}` : ""}）`;
+    const tpDesc = takeProfits.length
+      ? takeProfits.map((t) => t.price).join("/")
+      : "-";
+    return `交易所止盈止損已掛（SL ${sl ?? "-"} / TP ${tpDesc}，共 ${ids.length} 張）`;
   } catch (err) {
     return `⚠️ 交易所止盈止損掛單失敗：${(err as Error).message}（本系統監控仍會執行）`;
   }

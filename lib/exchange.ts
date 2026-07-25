@@ -60,9 +60,10 @@ export interface ExchangeClient {
   placeStopOrders?(opts: {
     symbol: string;                  // venue symbol
     side: "BUY" | "SELL";            // the CLOSING side
-    size: string;                    // base-asset quantity to protect
+    size: string;                    // base-asset quantity the stop protects
     stopLoss?: number | null;
-    takeProfit?: number | null;
+    // one entry per take-profit target, each with the slice it closes
+    takeProfits?: { price: number; size: string }[];
   }): Promise<string[]>;
   cancelStopOrders?(venueSymbol: string): Promise<number>;
 }

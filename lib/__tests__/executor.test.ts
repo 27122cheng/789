@@ -707,13 +707,12 @@ describe("exchange-side stops", () => {
       "TRXUSDT LONG Entry: 3000 SL: 2900 TP1: 3100 TP2: 3200", meta(), cfg
     );
 
-    // a protective OCO now sits on the exchange for this position
-    expect(algos).toHaveLength(1);
+    // 分批止盈: a stop covering the whole position + one order per target
+    expect(algos.map((a) => a.ordType)).toEqual(["conditional", "conditional", "conditional"]);
     expect(algos[0].instId).toBe("TRX-USDT-SWAP");
-    expect(algos[0].ordType).toBe("oco");
     expect(algos[0].side).toBe("sell");              // closing side of a long
     expect(algos[0].slTriggerPx).toBe("2900.000");
-    expect(algos[0].tpTriggerPx).toBe("3100.000");   // first target
+    expect(algos.map((a) => a.tpTriggerPx).filter(Boolean)).toEqual(["3100.000", "3200.000"]);
     const rec = (await getOrders()).find((o) => o.symbol === "TRXUSDT" && o.success);
     expect(rec!.message).toContain("交易所止盈止損已掛");
 
@@ -721,5 +720,52 @@ describe("exchange-side stops", () => {
     await handleIncomingMessage("TRXUSDT 平倉", meta(), cfg);
     expect((await getPositions())["TRXUSDT"]).toBeUndefined();
     expect(cancels.length).toBeGreaterThan(0);
+  });
+});
+
+describe("leverage fallback", () => {
+  it("uses the max when the signal states no leverage", async () => {
+    const cfg = settings();
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.risk.maxOpenPositions = 50;
+    cfg.trading.leverage = { default: 5, max: 30, whenUnspecified: "max" };
+    await handleIncomingMessage("APTUSDT LONG Entry: 60000 SL: 59000", meta(), cfg);
+    expect((await getPositions())["APTUSDT"].leverage).toBe(30);
+  });
+
+  it("uses the default instead when configured that way", async () => {
+    const cfg = settings();
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.risk.maxOpenPositions = 50;
+    cfg.trading.leverage = { default: 5, max: 30, whenUnspecified: "default" };
+    await handleIncomingMessage("OPUSDT LONG Entry: 60000 SL: 59000", meta(), cfg);
+    expect((await getPositions())["OPUSDT"].leverage).toBe(5);
+  });
+
+  it("still honours a leverage the signal does state, capped at the max", async () => {
+    const cfg = settings();
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.risk.maxOpenPositions = 50;
+    cfg.trading.leverage = { default: 5, max: 30, whenUnspecified: "max" };
+    await handleIncomingMessage("SUIUSDT LONG 12x Entry: 60000 SL: 59000", meta(), cfg);
+    expect((await getPositions())["SUIUSDT"].leverage).toBe(12);
+  });
+});
+
+describe("追蹤止損 signal", () => {
+  it("moves the stop-loss from a 建議止損調整 message", async () => {
+    const cfg = settings();
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.risk.maxOpenPositions = 50;
+    await handleIncomingMessage("NEARUSDT LONG Entry: 60000 SL: 59000 TP1: 61000", meta(), cfg);
+    expect((await getPositions())["NEARUSDT"].stopLoss).toBe(59000);
+
+    await handleIncomingMessage(
+      `🔔 加密掃描 Pro — 建議止損調整\nNEAR/USDT\n新止損： $59500`,
+      meta(), cfg
+    );
+    expect((await getPositions())["NEARUSDT"].stopLoss).toBe(59500);
+    const rec = (await getOrders()).find((o) => o.action === "update_sl" && o.symbol === "NEARUSDT");
+    expect(rec!.success).toBe(true);
   });
 });

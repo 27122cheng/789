@@ -152,7 +152,14 @@ export interface Settings {
     addPositionUsdt: number; // 加倉每次的名目 USDT，0 = 與主要 sizing 相同
     // 加倉位掛單前，價格需越過該價位持續的秒數（之後回踩到位才成交）
     addArmSeconds: number;
-    leverage: { default: number; max: number };
+    leverage: {
+      default: number;
+      max: number;
+      // Which leverage to use when the signal itself doesn't state one:
+      //   "default" - use the default above
+      //   "max"     - use the maximum
+      whenUnspecified: "default" | "max";
+    };
     risk: {
       symbolWhitelist: string[];
       symbolBlacklist: string[];
@@ -237,7 +244,7 @@ export const DEFAULT_SETTINGS: Settings = {
     sizing: { mode: "fixed_usdt", fixedUsdt: 100, percentBalance: 5 },
     addPositionUsdt: 0,
     addArmSeconds: 60,
-    leverage: { default: 10, max: 20 },
+    leverage: { default: 10, max: 20, whenUnspecified: "max" },
     risk: {
       symbolWhitelist: [],
       symbolBlacklist: [],
