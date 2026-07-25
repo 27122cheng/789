@@ -23,6 +23,7 @@ api_id / api_hash 到 https://my.telegram.org → API development tools 取得�
 import asyncio
 import html
 import os
+import time
 
 import aiohttp
 from aiohttp import web
@@ -49,6 +50,13 @@ DEFAULT_API_ID = int(os.getenv("DEFAULT_API_ID", "2040"))
 DEFAULT_API_HASH = os.getenv("DEFAULT_API_HASH", "b18441a1ff607e10a989891a5462e627")
 # where to load/save the persisted login (derived from INGEST_URL)
 SESSION_URL = INGEST_URL.replace("/api/ingest", "/api/session")
+MONITOR_URL = INGEST_URL.replace("/api/ingest", "/api/cron/monitor")
+# Stop-losses, take-profits, 到價進場 and trailing stops are all driven by the
+# monitor tick. An external cron (cron-job.org) is easy to mis-configure or
+# silently stop - and if it does, positions are left unmanaged. This process is
+# already running 24/7 for Telegram, so it pings the monitor itself as well.
+# Set MONITOR_SECONDS=0 to disable (e.g. if you prefer to rely on the cron).
+MONITOR_SECONDS = int(os.getenv("MONITOR_SECONDS") or "60")
 
 # in-memory login/runtime state
 state = {
@@ -62,6 +70,9 @@ state = {
     "last": "",
     "error": "",
     "session_string": "",
+    "monitor_at": "",     # last monitor ping
+    "monitor_ok": None,
+    "monitor_note": "",
 }
 
 
@@ -126,6 +137,18 @@ def page(body: str) -> web.Response:
 def status_body() -> str:
     watched = ", ".join(WATCH_CHATS) if WATCH_CHATS else "所有頻道與群組"
     err = f'<p class="err">錯誤：{html.escape(state["error"])}</p>' if state["error"] else ""
+    if MONITOR_SECONDS <= 0:
+        monitor = ('<div class="panel hint">⏸ 監控推送已停用（MONITOR_SECONDS=0），'
+                   '請確認有其他排程在呼叫監控端點。</div>')
+    elif state["monitor_ok"] is None:
+        monitor = f'<div class="panel hint">⏳ 監控推送啟動中（每 {MONITOR_SECONDS} 秒）…</div>'
+    elif state["monitor_ok"]:
+        monitor = (f'<div class="panel"><p class="ok">✅ 監控推送正常 — 每 {MONITOR_SECONDS} 秒一次，'
+                   f'最後 {html.escape(state["monitor_at"])}</p>'
+                   f'<p class="hint">止損／止盈／到價進場／移動止損都靠這個。</p></div>')
+    else:
+        monitor = (f'<div class="panel"><p class="err">⚠️ 監控推送失敗 — '
+                   f'{html.escape(state["monitor_at"])}：{html.escape(state["monitor_note"])}</p></div>')
     persist = """<div class="panel">
   <p class="ok">🔑 登入已自動存到你的 Vercel 資料庫，之後主機重開都會自動保持登入，
   不用再做任何事。</p>
@@ -139,6 +162,7 @@ def status_body() -> str:
   <p class="hint">轉發目標：{html.escape(INGEST_URL) or '⚠️ 尚未設定 INGEST_URL'}</p>
   {err}
 </div>
+{monitor}
 {persist}
 <div class="panel hint">這個頁面開著或關掉都不影響，程式在背景持續運作。
 關掉整個程式（或主機停機）才會停止監聽。</div>"""
@@ -312,6 +336,25 @@ async def try_resume_session():
         state["error"] = str(e)
 
 
+async def monitor_loop():
+    """Call the site's monitor endpoint every MONITOR_SECONDS, forever."""
+    if not MONITOR_URL or MONITOR_SECONDS <= 0:
+        return
+    headers = {"x-admin-password": ADMIN_PASSWORD}
+    while True:
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.get(MONITOR_URL, headers=headers, timeout=50) as r:
+                    body = await r.text()
+                    state["monitor_ok"] = r.status == 200
+                    state["monitor_note"] = f"HTTP {r.status} {body[:160]}"
+        except Exception as e:  # noqa: BLE001
+            state["monitor_ok"] = False
+            state["monitor_note"] = str(e)[:200]
+        state["monitor_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        await asyncio.sleep(MONITOR_SECONDS)
+
+
 async def main():
     app = web.Application()
     app.add_routes([
@@ -325,6 +368,8 @@ async def main():
     await site.start()
     print(f"listener web UI on http://0.0.0.0:{PORT}")
     await try_resume_session()
+    asyncio.create_task(monitor_loop())
+    print(f"monitor ping every {MONITOR_SECONDS}s -> {MONITOR_URL}")
     await asyncio.Event().wait()  # run forever
 
 

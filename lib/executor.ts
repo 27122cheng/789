@@ -707,8 +707,44 @@ export async function executeSignal(
         const p = pos!;
         const sizeUsdt = await computeSizeUsdt(settings, signal, client, live, true);
         const refPrice = await fetchPriceSafe(client, sym, signal.entryPrice ?? p.entryPrice);
+        const addLive = live && !p.dryRun;
+
+        // 加倉確認: the signal names a price to rest a limit order at ("回踩此價
+        // 成交"), and the breakout it waits for has already been confirmed by
+        // the sender. Rest a real order there instead of buying at market, and
+        // leave the MAIN stop alone - the signal says it moves later, under its
+        // own notice; the stop quoted here belongs to this tranche only.
+        if (signal.entryPrice != null && addLive) {
+          const r = await placeEntry(
+            client, true, sym, p.side, sizeUsdt, "limit", signal.entryPrice, refPrice, p.leverage,
+            settings.trading.orders.belowMinSize ?? "lift"
+          );
+          p.pendingAdds = [
+            ...(p.pendingAdds ?? []),
+            {
+              level: signal.entryPrice,
+              armedAt: Date.now(),
+              armed: true,
+              orderId: r.orderIds[0] ?? null,
+              qty: r.qty,
+              sizeUsdt,
+              stopLoss: signal.stopLoss ?? null,
+            },
+          ];
+          await savePositions(positions);
+          await setCooldown(sym, Date.now());
+          await record("add",
+            { symbol: sym, side: p.side, sizeUsdt, qty: 0, price: signal.entryPrice, leverage: p.leverage },
+            true, true,
+            `加倉確認：已掛限價單 @ ${signal.entryPrice}（回踩成交）` +
+              (signal.stopLoss ? `，此筆止損 ${signal.stopLoss}` : "") +
+              "；主倉止損不變，等後續通知",
+            r.orderIds);
+          return;
+        }
+
         const res = await placeEntry(
-          client, live && !p.dryRun, sym, p.side, sizeUsdt, "market", null, refPrice, p.leverage,
+          client, addLive, sym, p.side, sizeUsdt, "market", null, refPrice, p.leverage,
           settings.trading.orders.belowMinSize ?? "lift"
         );
         const newQty = p.qty + res.qty;
@@ -717,7 +753,6 @@ export async function executeSignal(
         p.originalQty += res.qty;
         p.sizeUsdt += sizeUsdt;
         p.addCount += 1;
-        if (signal.stopLoss) p.stopLoss = signal.stopLoss;
         await savePositions(positions);
         await setCooldown(sym, Date.now());
         const addStopNote = await syncExchangeStops(client, settings, live, p);
@@ -1035,6 +1070,45 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
     );
     const remaining: typeof pending = [];
     for (const add of pending) {
+      // A 加倉確認 tranche rests as a real order on the exchange; it is filled
+      // when it leaves the book, exactly like the entry order.
+      if (add.orderId && live && !pos.dryRun) {
+        const open = await client
+          .getOpenOrders(client.perpSymbol(sym))
+          .catch(() => null);
+        if (open == null) {
+          remaining.push(add);   // can't tell right now, check again later
+          continue;
+        }
+        const resting = open.some(
+          (o: any) => String(o.orderId ?? o.id ?? "") === String(add.orderId)
+        );
+        if (resting) {
+          remaining.push(add);
+          continue;
+        }
+        const addQty = add.qty ?? 0;
+        if (addQty > 0) {
+          const newQty = pos.qty + addQty;
+          pos.entryPrice =
+            (pos.entryPrice * pos.qty + add.level * addQty) / newQty;
+          pos.qty = newQty;
+          pos.originalQty += addQty;
+          pos.sizeUsdt += add.sizeUsdt ?? 0;
+          pos.addCount += 1;
+          changed = true;
+          actions.push(`${sym}: 加倉限價單成交 @ ${add.level}`);
+          const note = await syncExchangeStops(client, settings, live, pos);
+          await record("add",
+            { symbol: sym, side: pos.side, sizeUsdt: add.sizeUsdt ?? 0, qty: addQty, price: add.level, leverage: pos.leverage },
+            true, true,
+            `加倉限價單成交 @ ${add.level}（第 ${pos.addCount} 次）` +
+              (note ? `；${note}` : ""),
+            [String(add.orderId)]);
+        }
+        continue;   // done with this tranche either way
+      }
+
       const beyond =
         add.level < pos.entryPrice ? price <= add.level : price >= add.level;
       const pulledBack =

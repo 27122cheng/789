@@ -54,6 +54,29 @@ const MOVE_VERBS = [
   "adjust", "trail",
 ];
 // 長線單升級信號: a short-term trade being upgraded to long-term -> update
+/** 長線單 加倉確認 messages ask for a limit order on ONE tranche. They carry a
+ *  full price structure (掛限價單於 / 此筆止損 / 主倉進場 / 主倉止損), so they must
+ *  be classified as an add BEFORE the generic "entry + SL = open" rule, and the
+ *  tranche's own prices must be read rather than the main position's. */
+const ADD_CONFIRM_MARKERS =
+  /加倉確認|加仓确认|加倉單|加仓单|加倉\s*#|加仓\s*#|(請|请)掛單|(請|请)挂单/;
+
+/** The tranche's limit price:「掛限價單於：$103」/「掛單於 103」. */
+function extractAddLimit(norm: string): number | null {
+  const m = norm.match(
+    /(?:掛|挂)(?:限價|限价)?單?於[：:\s]*\$?\s*([0-9]*\.?[0-9]+)/
+  );
+  return m ? parseFloat(m[1]) : null;
+}
+
+/** The tranche's own stop:「此筆止損：$101.5」(NOT 主倉止損). */
+function extractTrancheStop(norm: string): number | null {
+  const m = norm.match(
+    /此(?:筆|笔)(?:止損|止损)[：:\s]*\$?\s*([0-9]*\.?[0-9]+)/
+  );
+  return m ? parseFloat(m[1]) : null;
+}
+
 // the existing position's SL/TP and attach the 加倉計劃 instead of opening anew
 const UPGRADE_MARKERS = /長線單升級|长线单升级|升級信號|升级信号|升級為長線|升级为长线/;
 // unmistakable "adjust the stop" phrasing used by signal bots
@@ -68,6 +91,12 @@ const NUM = /[\d][\d,]*(?:\.\d+)?/;
 const SYMBOL_RE = new RegExp(
   `\\b([A-Za-z0-9]{2,15})[\\-/_]?(${QUOTES.join("|")})\\b`
 );
+// 長線單 加倉確認 headers name the coin without a quote currency:
+// "加倉確認 #1｜請掛單 — BTC ▲ 做多". Only accepted when a direction marker sits
+// right next to the ticker, so ordinary prose cannot be mistaken for a pair.
+const DIRECTIONAL_SYMBOL_RE =
+  /(?:^|[\s\-—|｜:：])([A-Z]{2,10})\s*(?:[▲▼]|做多|做空|多單|空單|\bLONG\b|\bSHORT\b)/;
+
 const LABELED_SYMBOL_RE = new RegExp(
   `(?:幣種|币种|标的|標的|symbol|pair|coin)\\s*[:：]?\\s*[$#]?([A-Za-z0-9]{2,15})`,
   "i"
@@ -111,6 +140,12 @@ export function extractSymbol(norm: string): string | null {
     for (const q of QUOTES) {
       if (base.endsWith(q) && base.length > q.length) return base;
     }
+    return `${base}USDT`;
+  }
+  const dm = DIRECTIONAL_SYMBOL_RE.exec(norm);
+  if (dm) {
+    const base = dm[1].toUpperCase();
+    if ((QUOTES as readonly string[]).includes(base)) return null;
     return `${base}USDT`;
   }
   return null;
@@ -279,6 +314,9 @@ export function parseSignal(
     action = "update_sl";
   } else if (CLOSED_MARKERS.test(norm)) {
     action = "close";
+  } else if (ADD_CONFIRM_MARKERS.test(norm) && findKeyword(ADD_KEYWORDS, lower) >= 0) {
+    // 加倉確認: an add tranche, despite carrying entry+stop wording
+    action = "add";
   } else if (hasEntry && (hasSl || hasTp)) {
     // full signal structure (entry + SL/TP) -> a fresh open, even if the
     // message also mentions 加倉計劃 levels or trailing-stop advice text
@@ -310,16 +348,25 @@ export function parseSignal(
     warnings.push("open signal without long/short side");
   }
 
+  // An add tranche carries its OWN limit price and stop; the 主倉 numbers in the
+  // same message describe the existing position and must not be used here.
+  const addLimit = action === "add" ? extractAddLimit(norm) : null;
+  const trancheStop = action === "add" ? extractTrancheStop(norm) : null;
+
   const stopLoss =
-    action === "update_sl" ? extractStopLoss(norm, true) : strictSl;
+    action === "update_sl"
+      ? extractStopLoss(norm, true)
+      : action === "add"
+      ? trancheStop
+      : strictSl;
 
   return {
     action,
     symbol,
     side,
     leverage: extractLeverage(norm),
-    entryPrice: entry.low,
-    entryPriceHigh: entry.high,
+    entryPrice: addLimit ?? entry.low,
+    entryPriceHigh: addLimit != null ? null : entry.high,
     takeProfits,
     stopLoss,
     stopLossBreakeven: breakeven,

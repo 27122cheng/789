@@ -944,3 +944,77 @@ describe("TP/SL attached to the entry order", () => {
     expect(algos.length).toBeGreaterThan(0);
   });
 });
+
+describe("加倉確認 tranche", () => {
+  it("rests a limit order at the tranche price, leaves the main stop alone, then folds the fill in", async () => {
+    const cfg = settings();
+    cfg.exchange = "okx";
+    cfg.okx = {
+      apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false,
+    };
+    cfg.trading.liveTrading = true;
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.risk.maxOpenPositions = 50;
+    cfg.trading.orders.entryType = "market";
+    cfg.trading.addPositionUsdt = 600;
+    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 600, percentBalance: 5 };
+
+    const orders: any[] = [];
+    let openOrders: any[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any[] = [];
+      if (url.includes("/account/config")) data = [{ posMode: "net_mode" }];
+      else if (url.includes("/public/instruments")) {
+        data = [{ instId: "ARB-USDT-SWAP", ctVal: "0.1", lotSz: "0.1", minSz: "0.1", tickSz: "0.1" }];
+      } else if (url.includes("/market/ticker")) data = [{ last: "100" }];
+      else if (url.includes("/account/positions")) data = [];
+      else if (url.includes("/orders-algo-pending")) data = [];
+      else if (url.includes("/trade/orders-pending")) data = openOrders;
+      else if (url.includes("algo")) data = [{ algoId: "A-1", sCode: "0" }];
+      else if (url.includes("/trade/order")) { orders.push(body); data = [{ ordId: "ADD-1", sCode: "0" }]; }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+
+    // main position first
+    await handleIncomingMessage("ARBUSDT LONG Entry: 100 SL: 99 TP1: 110", meta(), cfg);
+    const before = (await getPositions())["ARBUSDT"];
+    expect(before).toBeDefined();
+    const qtyBefore = before.qty;
+
+    await handleIncomingMessage(
+      `📌 加倉確認 #1｜請掛單 — ARB ▲ 做多
+
+✅ 價格已站上加倉點上方並持續 2 分鐘，確認非假突破
+
+🎯 掛限價單於：$103（回踩此價成交）
+🛑 此筆止損：$101.5
+📌 主倉進場：$100　主倉止損：$99`,
+      meta(), cfg
+    );
+
+    let pos = (await getPositions())["ARBUSDT"];
+    // a resting LIMIT order at the tranche price, not a market buy
+    const limitOrder = orders.find((o) => o.ordType === "limit");
+    expect(limitOrder.px).toBe("103.0");
+    // the tranche's stop must NOT retighten the whole position
+    expect(pos.stopLoss).toBe(99);
+    expect(pos.qty).toBe(qtyBefore);           // nothing added until it fills
+    expect(pos.pendingAdds[0].orderId).toBe("ADD-1");
+
+    // still resting -> unchanged
+    openOrders = [{ ordId: "ADD-1" }];
+    await monitorTick(cfg);
+    expect((await getPositions())["ARBUSDT"].qty).toBe(qtyBefore);
+
+    // leaves the book -> folded into the position at the tranche price
+    openOrders = [];
+    await monitorTick(cfg);
+    pos = (await getPositions())["ARBUSDT"];
+    expect(pos.qty).toBeGreaterThan(qtyBefore);
+    expect(pos.addCount).toBe(1);
+    expect(pos.entryPrice).toBeGreaterThan(100);   // averaged up toward 103
+    expect(pos.stopLoss).toBe(99);                 // main stop still untouched
+  });
+});

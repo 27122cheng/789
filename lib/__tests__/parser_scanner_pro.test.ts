@@ -177,3 +177,28 @@ describe("noise rejection (analysis posts must NOT become signals)", () => {
     expect(s.stopLoss).toBe(140);
   });
 });
+
+describe("長線單 加倉確認 (tranche limit order)", () => {
+  const msg = `📌 加倉確認 #1｜請掛單 — BTC ▲ 做多
+
+✅ 價格已站上加倉點上方並持續 2 分鐘，確認非假突破
+
+🎯 掛限價單於：$103（回踩此價成交）
+🛑 此筆止損：$101.5
+📌 主倉進場：$100　主倉止損：$99
+
+📝 成交後主倉止損將往獲利方向推進，屆時另行通知`;
+
+  it("is an add, not a new position, despite the entry+stop wording", () => {
+    const sig = parseSignal(msg, meta);
+    expect(sig).not.toBeNull();
+    expect(sig!.action).toBe("add");
+    expect(sig!.symbol).toBe("BTCUSDT");
+  });
+
+  it("uses the tranche's limit price and stop, not the main position's", () => {
+    const sig = parseSignal(msg, meta)!;
+    expect(sig.entryPrice).toBe(103);      // 掛限價單於, not 主倉進場 100
+    expect(sig.stopLoss).toBe(101.5);      // 此筆止損, not 主倉止損 99
+  });
+});

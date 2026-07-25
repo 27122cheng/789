@@ -34,6 +34,13 @@ export interface PendingAdd {
   level: number;
   armedAt: number | null;  // when price was first seen beyond the level
   armed: boolean;          // stayed beyond long enough -> waiting for pullback
+  // A 加倉確認 signal has already confirmed the breakout and asks for a limit
+  // order at `level`, so instead of arming a virtual order we rest a REAL one
+  // on the exchange and fill the add when it leaves the order book.
+  orderId?: string | null;
+  qty?: number;            // base quantity submitted with that order
+  sizeUsdt?: number;       // notional it represents
+  stopLoss?: number | null; // the tranche's own stop, for the record
 }
 
 export interface Position {
