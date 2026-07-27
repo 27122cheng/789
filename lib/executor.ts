@@ -879,6 +879,44 @@ export async function executeSignal(
           }
         }
 
+        // Some providers only consider a call valid once price has held the
+        // level for a few minutes. Placing immediately would enter on the spike
+        // their rule is designed to sit out, so the order is deferred and the
+        // monitor places it when the wait is up. Timed from the SIGNAL's own
+        // timestamp, so delivery lag counts towards the wait instead of adding
+        // to it.
+        const delaySec = settings.trading.orders.entryDelaySeconds ?? 0;
+        const placeAt = signal.timestamp + delaySec * 1000;
+        if (delaySec > 0 && Date.now() < placeAt && aligned.entry != null && refPrice != null) {
+          const risk = slForRisk != null ? Math.abs(aligned.entry - slForRisk) : null;
+          const waitSec = Math.round((placeAt - Date.now()) / 1000);
+          positions[sym] = {
+            ...common,
+            entryPrice: aligned.entry, // planned
+            qty: 0,
+            originalQty: 0,
+            initialRisk: risk,
+            rTargets: mkR(risk),
+            orderIds: [],
+            pendingEntry: {
+              target: aligned.entry,
+              dir: refPrice >= aligned.entry ? "down" : "up",
+              mode: "scheduled",
+              orderId: null,
+              qty: sizeUsdt / aligned.entry,
+              placeAt,
+            },
+          };
+          await savePositions(positions);
+          await setCooldown(sym, Date.now());
+          await record("open",
+            { symbol: sym, side: signal.side, sizeUsdt, qty: 0, price: aligned.entry, leverage },
+            live, true,
+            `延後掛單：訊號時間 +${delaySec} 秒後才掛（約 ${waitSec} 秒後，` +
+              `進場價 ${aligned.entry}，現價 ${refPrice}）`);
+          return;
+        }
+
         // entryType "limit" + a target the market hasn't reached yet: rest a
         // REAL limit order at the signal's entry price so it fills at exactly
         // that price. If the venue rejects it, the trade is skipped by default -
@@ -1263,6 +1301,112 @@ export async function executeSignal(
 }
 
 /**
+ * Places the entry for a position that was deferred by orders.entryDelaySeconds.
+ *
+ * Mutates `pos` in place and returns a note for the action log, or null when
+ * nothing could be done this tick (so the caller leaves the position alone and
+ * retries). On a terminal failure it clears `pendingEntry` and leaves qty at 0,
+ * which tells the caller to drop the position.
+ *
+ * The wait exists precisely because the market moves during it, so the decision
+ * of limit-vs-market is made HERE against the price now, not against the price
+ * when the signal arrived.
+ */
+async function placeDeferredEntry(
+  client: ExchangeClient,
+  settings: Settings,
+  live: boolean,
+  pos: Position,
+  price: number
+): Promise<string | null> {
+  const sym = pos.symbol;
+  const target = pos.pendingEntry!.target;
+  const dir = pos.pendingEntry!.dir;
+  const reached = dir === "down" ? price <= target : price >= target;
+  const entryType = pos.entryOrderType ?? settings.trading.orders.entryType;
+  const isLiveOrder = live && !pos.dryRun;
+  const protect = settings.trading.orders.exchangeStops
+    ? {
+        stopLoss: pos.stopLoss,
+        takeProfits: await alignPlan(
+          client, sym,
+          entryProtection(
+            settings, pos.side, target, pos.stopLoss,
+            target > 0 ? pos.sizeUsdt / target : 0, pos.takeProfits
+          )
+        ),
+      }
+    : undefined;
+
+  // still short of the level: rest the limit order the delay was holding back
+  if (entryType === "limit" && !reached) {
+    try {
+      const r = await placeEntry(
+        client, isLiveOrder, sym, pos.side, pos.sizeUsdt, "limit", target, price,
+        pos.leverage, settings.trading.orders.belowMinSize ?? "lift", protect
+      );
+      pos.pendingEntry = {
+        target, dir, mode: isLiveOrder ? "limit_order" : "watch",
+        orderId: r.orderIds[0] ?? null, qty: r.qty, placeAt: null,
+      };
+      pos.orderIds = r.orderIds;
+      await record("open",
+        { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: 0, price: target, leverage: pos.leverage },
+        isLiveOrder, true, `延後時間到 → ${r.note}`, r.orderIds);
+      return `延後時間到，已掛限價單 @ ${target}（現價 ${price}）`;
+    } catch (err) {
+      const emsg = (err as Error).message;
+      if (
+        (settings.trading.orders.limitRejected ?? "skip") === "skip" ||
+        isUnrecoverable(emsg)
+      ) {
+        pos.pendingEntry = null; // caller drops the position
+        await record("open",
+          { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: 0, price: target, leverage: pos.leverage },
+          isLiveOrder, false,
+          `延後時間到但掛限價單被拒：${emsg}${okxCodeHint(emsg) ?? ""} → 略過這筆，不進場`);
+        return `延後時間到但掛單被拒（${emsg}）→ 略過`;
+      }
+      pos.pendingEntry = { target, dir, mode: "watch", orderId: null, qty: pos.pendingEntry!.qty, placeAt: null };
+      return `延後時間到但掛單被拒（${emsg}）→ 改用到價自動進場`;
+    }
+  }
+
+  // price already at or through the level: enter now at market
+  try {
+    const r = await placeEntry(
+      client, isLiveOrder, sym, pos.side, pos.sizeUsdt, "market", null, price,
+      pos.leverage, settings.trading.orders.belowMinSize ?? "lift", protect
+    );
+    pos.entryPrice = r.price;
+    pos.qty = r.qty;
+    pos.originalQty = r.qty;
+    pos.initialRisk = pos.stopLoss != null ? Math.abs(r.price - pos.stopLoss) : null;
+    pos.pendingEntry = null;
+    pos.orderIds = r.orderIds;
+    const needsExtra = !r.attached || tpSlices(settings, pos).length > 1;
+    const stopNote = needsExtra
+      ? await syncExchangeStops(client, settings, live, pos)
+      : null;
+    await record("open",
+      { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: r.qty, price: r.price, leverage: pos.leverage },
+      isLiveOrder, true,
+      `延後時間到，已到價 → ${r.note}` + (stopNote ? `；${stopNote}` : ""), r.orderIds);
+    return `延後時間到且已到價，市價進場 @ ${r.price}`;
+  } catch (err) {
+    const emsg = (err as Error).message;
+    if (err instanceof BelowMinSizeError || isUnrecoverable(emsg)) {
+      pos.pendingEntry = null; // caller drops the position
+      await record("open",
+        { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: 0, price: target, leverage: pos.leverage },
+        isLiveOrder, false, `延後時間到但進場失敗：${emsg}${okxCodeHint(emsg) ?? ""} → 略過這筆`);
+      return `延後時間到但進場失敗（${emsg}）→ 略過`;
+    }
+    return null; // transient - leave it scheduled and try again next tick
+  }
+}
+
+/**
  * Removes ONE tracked position, for the dashboard's per-row delete.
  *
  * Deliberately does not touch a real open position: the exchange is the source
@@ -1442,6 +1586,18 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
         delete positions[sym];
         changed = true;
         actions.push(`${sym}: 待進場逾時未到價，取消`);
+        continue;
+      }
+
+      // Deferred by orders.entryDelaySeconds: nothing is on the exchange yet.
+      if (mode === "scheduled") {
+        const at = pos.pendingEntry.placeAt ?? 0;
+        if (Date.now() < at) continue; // wait is not up
+        const note = await placeDeferredEntry(client, settings, live, pos, price);
+        if (note === null) continue; // could not act this tick - try again
+        changed = true;
+        if (!pos.qty && !pos.pendingEntry) delete positions[sym];
+        actions.push(`${sym}: ${note}`);
         continue;
       }
 

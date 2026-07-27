@@ -231,9 +231,18 @@ export default function Dashboard() {
                     <td>{p.addCount}</td>
                     <td>
                       {p.pendingEntry
-                        ? (p.pendingEntry.mode === "limit_order"
-                            ? "⏳ 掛單中 "
-                            : "⏳ 待進場 ")
+                        ? p.pendingEntry.mode === "limit_order"
+                          ? "⏳ 掛單中 "
+                          : p.pendingEntry.mode === "scheduled"
+                            ? `⏳ 等待延遲${
+                                p.pendingEntry.placeAt
+                                  ? `（約 ${Math.max(
+                                      0,
+                                      Math.round((p.pendingEntry.placeAt - Date.now()) / 1000)
+                                    )} 秒）`
+                                  : ""
+                              } `
+                            : "⏳ 待進場 "
                         : ""}
                       {p.dryRun ? "模擬" : "真實"}
                     </td>

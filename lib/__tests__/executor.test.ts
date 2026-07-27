@@ -2134,3 +2134,152 @@ describe("deleting one tracked position", () => {
     expect(await dropPosition("NOSUCHUSDT", settings())).toMatchObject({ found: false });
   });
 });
+
+describe("delaying the entry order after the signal", () => {
+  // the in-memory store persists across tests in this file, and by here it
+  // holds enough positions to trip maxOpenPositions
+  beforeEach(() => savePositions({}));
+
+  function stub(orders: any[], price = "5") {
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any[] = [];
+      if (url.includes("/public/instruments")) {
+        data = ["SUI", "SEI", "APT", "ARB", "OP"].map((b) => ({
+          instId: `${b}-USDT-SWAP`, ctVal: "1", lotSz: "0.1", minSz: "0.1", tickSz: "0.0001",
+        }));
+      } else if (url.includes("/market/ticker")) {
+        data = [{ last: price }];
+      } else if (url.includes("/account/set-leverage")) {
+        data = [{ lever: "10" }];
+      } else if (url.includes("/account/positions")) {
+        data = [];
+      } else if (url.includes("algo") || url.includes("orders-pending")) {
+        data = [];
+      } else if (url.includes("/trade/order")) {
+        orders.push(body);
+        data = [{ ordId: `OID-${orders.length}`, sCode: "0" }];
+      }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+  }
+
+  function cfg(delaySec: number): Settings {
+    const c = settings();
+    c.exchange = "okx";
+    c.okx = {
+      apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false,
+    };
+    c.trading.liveTrading = true;
+    c.trading.risk.cooldownSeconds = 0;
+    c.trading.risk.maxOpenPositions = 20;
+    c.trading.orders.entryType = "limit";
+    c.trading.orders.entryDelaySeconds = delaySec;
+    return c;
+  }
+
+  it("sends nothing to the exchange until the wait is up", async () => {
+    const orders: any[] = [];
+    stub(orders);
+    await handleIncomingMessage(
+      "SUIUSDT LONG 10x Entry: 4 SL: 3.6 TP1: 5.5", meta(), cfg(120)
+    );
+    const pos = (await getPositions())["SUIUSDT"];
+    expect(pos.pendingEntry!.mode).toBe("scheduled");
+    expect(orders).toHaveLength(0);           // nothing placed yet
+    expect(pos.qty).toBe(0);
+
+    // one minute in, still waiting
+    await monitorTick(cfg(120));
+    expect((await getPositions())["SUIUSDT"].pendingEntry!.mode).toBe("scheduled");
+    expect(orders).toHaveLength(0);
+  });
+
+  it("counts the wait from the signal's own time, not from delivery", async () => {
+    const orders: any[] = [];
+    stub(orders);
+    // the message is already 3 minutes old when it reaches us, so a 2-minute
+    // rule is satisfied on arrival - waiting again would double the delay
+    const late = { ...meta(), timestamp: Date.now() - 180_000 };
+    const c = cfg(120);
+    c.trading.risk.maxSignalAgeSeconds = 3600;
+    await handleIncomingMessage("SEIUSDT LONG 10x Entry: 4 SL: 3.6 TP1: 5.5", late, c);
+    const pos = (await getPositions())["SEIUSDT"];
+    expect(pos).toBeDefined();
+    expect(pos.pendingEntry!.mode).toBe("limit_order");
+    expect(orders).toHaveLength(1);
+  });
+
+  it("places the held-back limit order once the wait passes", async () => {
+    const orders: any[] = [];
+    stub(orders);
+    const c = cfg(120);
+    await handleIncomingMessage(
+      "APTUSDT LONG 10x Entry: 4 SL: 3.6 TP1: 5.5", meta(), c
+    );
+    // pretend the two minutes elapsed
+    const positions = await getPositions();
+    positions["APTUSDT"].pendingEntry!.placeAt = Date.now() - 1000;
+    await savePositions(positions);
+
+    await monitorTick(c);
+    const pos = (await getPositions())["APTUSDT"];
+    expect(pos.pendingEntry!.mode).toBe("limit_order");
+    expect(orders).toHaveLength(1);
+    expect(orders[0].ordType).toBe("limit");
+    expect(Number(orders[0].px)).toBe(4);
+  });
+
+  it("enters at market when price ran through the level during the wait", async () => {
+    // the whole point of waiting is that the market moves meanwhile, so the
+    // limit-vs-market decision has to be made when the wait ends, not when the
+    // signal arrived. Long pullback entry at 4, price 5 at the call, 3.5 later.
+    const orders: any[] = [];
+    let price = "5";
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any[] = [];
+      if (url.includes("/public/instruments")) {
+        data = [{ instId: "ARB-USDT-SWAP", ctVal: "1", lotSz: "0.1", minSz: "0.1", tickSz: "0.0001" }];
+      } else if (url.includes("/market/ticker")) data = [{ last: price }];
+      else if (url.includes("/account/set-leverage")) data = [{ lever: "10" }];
+      else if (url.includes("/account/positions")) data = [];
+      else if (url.includes("algo") || url.includes("orders-pending")) data = [];
+      else if (url.includes("/trade/order")) {
+        orders.push(body);
+        data = [{ ordId: `OID-${orders.length}`, sCode: "0" }];
+      }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+
+    const c = cfg(120);
+    await handleIncomingMessage(
+      "ARBUSDT LONG 10x Entry: 4 SL: 3.2 TP1: 5.5", meta(), c
+    );
+    const positions = await getPositions();
+    expect(positions["ARBUSDT"].pendingEntry!.mode).toBe("scheduled");
+    expect(orders).toHaveLength(0);
+
+    price = "3.5";                                   // fell through 4 while waiting
+    positions["ARBUSDT"].pendingEntry!.placeAt = Date.now() - 1000;
+    await savePositions(positions);
+    await monitorTick(c);
+
+    const pos = (await getPositions())["ARBUSDT"];
+    expect(pos.pendingEntry).toBeNull();
+    expect(pos.qty).toBeGreaterThan(0);
+    expect(orders[0].ordType).toBe("market");
+  });
+
+  it("is off by default, so a signal still places immediately", async () => {
+    const orders: any[] = [];
+    stub(orders);
+    const c = cfg(0);
+    await handleIncomingMessage(
+      "OPUSDT LONG 10x Entry: 4 SL: 3.6 TP1: 5.5", meta(), c
+    );
+    expect((await getPositions())["OPUSDT"].pendingEntry!.mode).toBe("limit_order");
+    expect(orders).toHaveLength(1);
+  });
+});

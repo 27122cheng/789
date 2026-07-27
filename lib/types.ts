@@ -83,9 +83,15 @@ export interface Position {
   pendingEntry: {
     target: number;
     dir: "up" | "down";
-    mode: "limit_order" | "watch";
+    //   "limit_order" - a real resting order sits on the exchange
+    //   "watch"       - no exchange order; the monitor enters at market on touch
+    //   "scheduled"   - nothing placed yet, waiting for `placeAt`
+    mode: "limit_order" | "watch" | "scheduled";
     orderId: string | null;
     qty: number;              // size submitted / to submit
+    /** For "scheduled": when the order may be placed, measured from the
+     *  SIGNAL's own timestamp rather than from when we happened to see it. */
+    placeAt?: number | null;
   } | null;
   orderIds: string[];          // pending entry order ids (limit entries)
   openedAt: number;
@@ -253,6 +259,12 @@ export interface Settings {
       // enters at market rather than at the signal's price, and does nothing at
       // all if the monitor is down - so most of those trades never really enter.
       limitRejected: "skip" | "watch";
+      // Wait this long after the SIGNAL'S OWN timestamp before placing the
+      // entry order, for providers whose rule is "enter N minutes after the
+      // call" (e.g. 站穩兩分鐘). 0 = place immediately. Measured from the
+      // message time, so a slow delivery does not add to the wait. Opens only:
+      // an 加倉確認 is already the provider's post-confirmation message.
+      entryDelaySeconds: number;
       attachStopLoss: boolean;
       attachTakeProfit: boolean;
       // 分批止盈: close an equal share of the position at each TP target
@@ -343,6 +355,7 @@ export const DEFAULT_SETTINGS: Settings = {
       exchangeStops: true,
       entryType: "market",
       limitRejected: "skip",
+      entryDelaySeconds: 0,
       attachStopLoss: true,
       attachTakeProfit: true,
       splitTakeProfit: true,
