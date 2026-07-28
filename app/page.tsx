@@ -68,7 +68,9 @@ export default function Dashboard() {
   }
 
   async function deletePosition(p: any) {
-    const resting = p.pendingEntry?.mode === "limit_order";
+    const restingCount =
+      (p.pendingEntry?.mode === "limit_order" ? 1 : 0) +
+      (p.pendingAdds ?? []).filter((a: any) => a?.orderId).length;
     const held = p.qty > 0;
     if (
       !confirm(
@@ -77,7 +79,9 @@ export default function Dashboard() {
             ? "⚠️ 交易所上的真實持倉與止盈止損不會更動，只是本系統不再管理它" +
               "（移動止損、分批止盈都會停止）。\n"
             : "") +
-          (resting ? "交易所上的進場掛單會一併取消。\n" : "") +
+          (restingCount
+            ? `交易所上的 ${restingCount} 筆掛單（進場／加倉）會一併取消。\n`
+            : "") +
           "\n刪除後這個幣種就能接受新的訊號。"
       )
     ) {

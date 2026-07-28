@@ -2355,3 +2355,49 @@ describe("an entry order that never fills", () => {
     expect((await getPositions())["LTCUSDT"]).toBeDefined();
   });
 });
+
+describe("deleting a position with orders resting on the exchange", () => {
+  beforeEach(() => savePositions({}));
+
+  it("cancels the add order too, not just the entry order", async () => {
+    // a 加倉確認 rests a REAL limit order, tracked only in pendingAdds - it
+    // would otherwise survive the delete and fill into an untracked position
+    const cancelled: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      let data: any[] = [];
+      if (url.includes("/public/instruments")) {
+        data = [{ instId: "DOGE-USDT-SWAP", ctVal: "1", lotSz: "1", minSz: "1", tickSz: "0.00001" }];
+      } else if (url.includes("cancel-order")) {
+        cancelled.push(JSON.parse(init.body).ordId);
+        data = [{ sCode: "0" }];
+      }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+    const cfg = settings();
+    cfg.exchange = "okx";
+    cfg.okx = {
+      apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false,
+    };
+    cfg.trading.liveTrading = true;
+
+    await savePositions({
+      DOGEUSDT: {
+        symbol: "DOGEUSDT", side: "long", entryPrice: 0.1, qty: 0, originalQty: 0,
+        sizeUsdt: 10, leverage: 10, stopLoss: 0.09, takeProfits: [0.13],
+        tpCountOriginal: 1, tpHit: [], addCount: 0, openedAt: Date.now(),
+        dryRun: false, initialRisk: 0.01, rTargets: [],
+        pendingEntry: { target: 0.1, dir: "down", mode: "limit_order", orderId: "ENTRY-1", qty: 100 },
+        pendingAdds: [
+          { level: 0.11, armedAt: null, armed: false, orderId: "ADD-1", qty: 50 },
+          { level: 0.12, armedAt: null, armed: false },   // no order resting
+        ],
+      } as any,
+    });
+
+    const res = await dropPosition("DOGEUSDT", cfg);
+    expect(res.warning).toBeNull();
+    expect(cancelled.sort()).toEqual(["ADD-1", "ENTRY-1"]);
+    expect((await getPositions())["DOGEUSDT"]).toBeUndefined();
+  });
+});

@@ -1425,19 +1425,36 @@ export async function dropPosition(
   const pos = positions[symbol];
   if (!pos) return { found: false, cancelledEntry: false, warning: null };
 
+  // Every resting order this record owns, not just the entry: a 加倉確認 rests a
+  // REAL limit order too, and it is tracked only here. Leaving one behind would
+  // let it fill later into a position nothing manages.
+  const restingIds: string[] = [];
+  if (pos.pendingEntry?.mode === "limit_order" && pos.pendingEntry.orderId) {
+    restingIds.push(String(pos.pendingEntry.orderId));
+  }
+  for (const add of pos.pendingAdds ?? []) {
+    if (add.orderId) restingIds.push(String(add.orderId));
+  }
+
   let cancelledEntry = false;
+  const failed: string[] = [];
   let warning: string | null = null;
-  const pending = pos.pendingEntry;
-  if (pending?.mode === "limit_order" && pending.orderId && isLive(settings) && !pos.dryRun) {
+  if (restingIds.length && isLive(settings) && !pos.dryRun) {
     const client = makeClient(settings);
-    try {
-      await client.cancelOrder(client.perpSymbol(symbol), String(pending.orderId));
-      cancelledEntry = true;
-    } catch (err) {
+    const venue = client.perpSymbol(symbol);
+    for (const id of restingIds) {
+      try {
+        await client.cancelOrder(venue, id);
+        cancelledEntry = true;
+      } catch (err) {
+        failed.push(`${id}（${(err as Error).message}）`);
+      }
+    }
+    if (failed.length) {
       // still remove the record - the user asked for that - but say plainly
       // that an order they cannot see here may still be resting
       warning =
-        `交易所上的進場掛單取消失敗（${(err as Error).message}），` +
+        `交易所上還有 ${failed.length} 筆掛單取消失敗：${failed.join("、")}。` +
         `請自行到 ${venueName(settings)} 撤單，否則它成交後不會有人管理。`;
     }
   }
@@ -1457,7 +1474,9 @@ export async function dropPosition(
     success: true,
     message:
       `手動從網站刪除持倉紀錄` +
-      (cancelledEntry ? "，並取消交易所的進場掛單" : "") +
+      (cancelledEntry
+        ? `，並取消交易所的掛單 ${restingIds.length - failed.length} 筆`
+        : "") +
       (pos.qty > 0 ? "（交易所上的真實持倉與止盈止損未更動）" : "") +
       (warning ? `；⚠️ ${warning}` : ""),
     orderIds: [],
