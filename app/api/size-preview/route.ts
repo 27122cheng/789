@@ -48,16 +48,30 @@ export async function GET(req: NextRequest) {
   // the entered amount means margin unless configured otherwise, so the actual
   // position is that amount times the leverage
   const levCfg = settings.trading.leverage;
-  const leverage =
+  const wantedLeverage =
     levParam > 0
       ? levParam
       : levCfg.whenUnspecified === "default"
       ? levCfg.default
       : levCfg.max;
   const basis = settings.trading.sizing.basis ?? "margin";
-  const notionalUsdt = basis === "margin" ? usdt * Math.max(1, leverage) : usdt;
 
   const venueSymbol = client.perpSymbol(symbol);
+
+  // Each contract has its own leverage ceiling, much lower on small caps than on
+  // BTC. Sizing against leverage the instrument will not grant is what made some
+  // coins fill and others fail with "insufficient margin", so the preview shows
+  // the ceiling and prices the position at the leverage that will really apply.
+  const venueMaxLeverage = client.maxLeverage
+    ? await client.maxLeverage(symbol).catch(() => null)
+    : null;
+  const leverage =
+    venueMaxLeverage && wantedLeverage > venueMaxLeverage
+      ? venueMaxLeverage
+      : wantedLeverage;
+  const leverageCapped = leverage !== wantedLeverage;
+  const notionalUsdt = basis === "margin" ? usdt * Math.max(1, leverage) : usdt;
+
   try {
     const [price, filters] = await Promise.all([
       client.getPrice(venueSymbol),
@@ -86,6 +100,9 @@ export async function GET(req: NextRequest) {
       requestedUsdt: usdt,
       basis,
       leverage,
+      wantedLeverage,
+      venueMaxLeverage,
+      leverageCapped,
       // what the entered amount actually becomes as a position
       targetNotionalUsdt: +notionalUsdt.toFixed(4),
       marginUsdt: +(finalQty * price / Math.max(1, leverage)).toFixed(4),

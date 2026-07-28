@@ -131,6 +131,20 @@ export default function OtherPage() {
                   <tr><td>交易所合約</td><td className="mono">{sizeResult.venueSymbol}</td></tr>
                   <tr><td>現價</td><td className="mono">{sizeResult.price}</td></tr>
                   <tr>
+                    <td>此幣種槓桿上限</td>
+                    <td className="mono">
+                      {sizeResult.venueMaxLeverage
+                        ? `${sizeResult.venueMaxLeverage}x`
+                        : "查不到"}
+                      {sizeResult.leverageCapped ? (
+                        <b style={{ color: "var(--red)" }}>
+                          {" "}← 你設定的 {sizeResult.wantedLeverage}x 超過上限，
+                          會改用 {sizeResult.leverage}x
+                        </b>
+                      ) : null}
+                    </td>
+                  </tr>
+                  <tr>
                     <td>你輸入的金額</td>
                     <td className="mono">
                       {sizeResult.requestedUsdt} USDT
