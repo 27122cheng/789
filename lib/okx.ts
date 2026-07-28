@@ -726,13 +726,19 @@ export class OkxClient implements ExchangeClient {
     });
   }
 
+  /** Cancels every resting order on the symbol; returns how many were cancelled.
+   *
+   *  Failures are NOT swallowed. Callers delete their own tracking record once
+   *  this returns, so a cancel that quietly failed would leave a live order
+   *  that can still fill - into a position nothing is managing. A failed
+   *  enumeration counts too: it made "could not ask" look like "nothing there". */
   async cancelAllOrders(instId: string): Promise<number> {
-    const orders = await this.getOpenOrders(instId).catch(() => []);
+    const orders = await this.getOpenOrders(instId);
     let n = 0;
     for (const o of orders) {
       const id = String(o.ordId ?? o.orderId ?? "");
       if (!id) continue;
-      await this.cancelOrder(instId, id).catch(() => {});
+      await this.cancelOrder(instId, id);
       n++;
     }
     return n;

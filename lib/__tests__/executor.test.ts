@@ -2283,3 +2283,75 @@ describe("delaying the entry order after the signal", () => {
     expect(orders).toHaveLength(1);
   });
 });
+
+describe("an entry order that never fills", () => {
+  beforeEach(() => savePositions({}));
+
+  function stub(opts: { cancelFails?: boolean } = {}) {
+    const cancelled: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      let data: any[] = [];
+      if (url.includes("/public/instruments")) {
+        data = [{ instId: "LTC-USDT-SWAP", ctVal: "1", lotSz: "0.1", minSz: "0.1", tickSz: "0.01" }];
+      } else if (url.includes("/market/ticker")) data = [{ last: "90" }];
+      else if (url.includes("/account/positions")) data = [];
+      else if (url.includes("cancel-batch-orders") || url.includes("cancel-order")) {
+        if (opts.cancelFails) {
+          return {
+            ok: true, status: 200,
+            json: async () => ({ code: "1", msg: "", data: [{ sCode: "51400", sMsg: "cancel failed" }] }),
+          };
+        }
+        cancelled.push(url);
+        data = [{ ordId: "OID-1", sCode: "0" }];
+      } else if (url.includes("orders-pending")) {
+        data = [{ instId: "LTC-USDT-SWAP", ordId: "OID-1" }];
+      } else if (url.includes("algo")) data = [];
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+    return cancelled;
+  }
+
+  function cfg(): Settings {
+    const c = settings();
+    c.exchange = "okx";
+    c.okx = {
+      apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false,
+    };
+    c.trading.liveTrading = true;
+    return c;
+  }
+
+  async function stalePosition() {
+    await savePositions({
+      LTCUSDT: {
+        symbol: "LTCUSDT", side: "long", entryPrice: 80, qty: 0, originalQty: 0,
+        sizeUsdt: 100, leverage: 10, stopLoss: 75, takeProfits: [95],
+        tpCountOriginal: 1, tpHit: [], addCount: 0, pendingAdds: [],
+        openedAt: Date.now() - 7 * 3600 * 1000,   // 7 hours ago
+        dryRun: false, initialRisk: 5, rTargets: [], orderIds: ["OID-1"],
+        pendingEntry: { target: 80, dir: "down", mode: "limit_order", orderId: "OID-1", qty: 1.25 },
+      } as any,
+    });
+  }
+
+  it("is cancelled and dropped after 6 hours, and says so in the log", async () => {
+    const cancelled = stub();
+    await stalePosition();
+    await monitorTick(cfg());
+    expect((await getPositions())["LTCUSDT"]).toBeUndefined();
+    expect(cancelled.length).toBeGreaterThan(0);
+    const rec = (await getOrders()).find((o) => o.symbol === "LTCUSDT" && o.action === "cancel");
+    expect(rec?.message).toMatch(/6 小時未成交/);
+  });
+
+  it("keeps the record when the cancel fails, so the order is never orphaned", async () => {
+    // dropping the record here would leave a live order that can still fill
+    // hours later, into a position nothing is managing
+    stub({ cancelFails: true });
+    await stalePosition();
+    await monitorTick(cfg());
+    expect((await getPositions())["LTCUSDT"]).toBeDefined();
+  });
+});

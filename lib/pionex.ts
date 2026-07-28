@@ -360,13 +360,15 @@ export class PionexClient implements ExchangeClient {
       await this.signed("DELETE", FUTURES.allOrders, {}, { symbol });
       return 1;
     } catch {
-      // fallback: enumerate open orders and cancel individually
-      const orders = await this.getOpenOrders(symbol).catch(() => []);
+      // Fallback: enumerate open orders and cancel individually. Failures here
+      // propagate - callers drop their tracking record once this returns, and a
+      // silently failed cancel leaves an order that can still fill unmanaged.
+      const orders = await this.getOpenOrders(symbol);
       let n = 0;
       for (const o of orders) {
         const id = String(o.orderId ?? o.id ?? "");
         if (!id) continue;
-        await this.cancelOrder(symbol, id).catch(() => {});
+        await this.cancelOrder(symbol, id);
         n++;
       }
       return n;

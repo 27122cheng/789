@@ -1580,12 +1580,28 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
       const { target, dir } = pos.pendingEntry;
       const mode = pos.pendingEntry.mode ?? "watch"; // legacy positions: watch
       if (Date.now() - pos.openedAt > pendingTimeoutMs) {
+        const hours = Math.round(pendingTimeoutMs / 3_600_000);
+        // The resting order must be gone from the exchange BEFORE the record
+        // is: dropping the record while the order still rests would leave it to
+        // fill hours later into a position nothing manages. A failed cancel
+        // therefore keeps the position for another tick instead of orphaning it.
         if (live && !pos.dryRun && mode === "limit_order") {
-          await client.cancelAllOrders(client.perpSymbol(sym)).catch(() => {});
+          try {
+            await client.cancelAllOrders(client.perpSymbol(sym));
+          } catch (err) {
+            actions.push(
+              `${sym}: 逾時撤單失敗（${(err as Error).message}），保留追蹤，下次再試`
+            );
+            continue;
+          }
         }
         delete positions[sym];
         changed = true;
         actions.push(`${sym}: 待進場逾時未到價，取消`);
+        await record("cancel",
+          { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: 0, price: target, leverage: pos.leverage },
+          live && !pos.dryRun, true,
+          `掛單 ${hours} 小時未成交 → 已撤單並移除追蹤（進場價 ${target}）`);
         continue;
       }
 
