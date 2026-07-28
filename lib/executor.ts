@@ -1520,7 +1520,10 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
   const actions: string[] = [];
   let changed = false;
 
-  const pendingTimeoutMs = 6 * 60 * 60 * 1000; // drop unfilled 到價進場 after 6h
+  // Give up on an unfilled entry after this long (orders.entryTimeoutHours);
+  // 0 means never, so the comparison below must not treat it as "already due".
+  const timeoutHours = settings.trading.orders.entryTimeoutHours ?? 6;
+  const pendingTimeoutMs = timeoutHours > 0 ? timeoutHours * 3_600_000 : Infinity;
   // A fresh entry may not be visible on the exchange for a moment, so a
   // position is only treated as closed once it has had time to register.
   const closeGraceMs = 2 * 60 * 1000;
@@ -1625,7 +1628,7 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
       const { target, dir } = pos.pendingEntry;
       const mode = pos.pendingEntry.mode ?? "watch"; // legacy positions: watch
       if (Date.now() - pos.openedAt > pendingTimeoutMs) {
-        const hours = Math.round(pendingTimeoutMs / 3_600_000);
+        const hours = timeoutHours;
         // The resting order must be gone from the exchange BEFORE the record
         // is: dropping the record while the order still rests would leave it to
         // fill hours later into a position nothing manages. A failed cancel

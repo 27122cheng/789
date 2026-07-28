@@ -45,6 +45,7 @@ export default function SettingsPage() {
   const [belowMinSize, setBelowMinSize] = useState("lift");
   const [limitRejected, setLimitRejected] = useState("skip");
   const [entryDelay, setEntryDelay] = useState(0);
+  const [entryTimeout, setEntryTimeout] = useState(6);
   const [exchangeStops, setExchangeStops] = useState(true);
   const [attachSl, setAttachSl] = useState(true);
   const [attachTp, setAttachTp] = useState(true);
@@ -104,6 +105,7 @@ export default function SettingsPage() {
     setBelowMinSize(s.trading.orders.belowMinSize ?? "lift");
     setLimitRejected(s.trading.orders.limitRejected ?? "skip");
     setEntryDelay(s.trading.orders.entryDelaySeconds ?? 0);
+    setEntryTimeout(s.trading.orders.entryTimeoutHours ?? 6);
     setExchangeStops(s.trading.orders.exchangeStops !== false);
     setAttachSl(!!s.trading.orders.attachStopLoss);
     setAttachTp(!!s.trading.orders.attachTakeProfit);
@@ -175,6 +177,7 @@ export default function SettingsPage() {
             belowMinSize,
             limitRejected,
             entryDelaySeconds: Number(entryDelay),
+            entryTimeoutHours: Number(entryTimeout),
             exchangeStops,
             attachStopLoss: attachSl,
             attachTakeProfit: attachTp,
@@ -448,6 +451,16 @@ export default function SettingsPage() {
               等待期間持倉列會顯示「⏳ 等待延遲」，時間到才會真的送單到交易所；
               若那時價格已經穿過進場價，就直接用市價進場。
               只影響開倉，加倉不受影響（「加倉確認｜請掛單」本來就是提供方確認後才發的）。
+            </p>
+            <label style={{ marginTop: 12 }}>掛單多久沒成交就刪除（小時）</label>
+            <input type="number" min={0} step={1} value={entryTimeout}
+                   onChange={(e) => setEntryTimeout(Number(e.target.value))} />
+            <p className="hint">
+              從<b>訊號時間</b>起算，超過這個時數還沒成交就<b>撤掉交易所的掛單</b>並移除追蹤，
+              那個幣種就重新開放接收新訊號（預設 <b>6</b> 小時）。
+              紀錄會留一筆說明，不會無聲消失；若撤單失敗會保留追蹤、下一分鐘再試，
+              以免留下一張沒人管理的單。
+              填 <b>0</b> = 永不刪除，掛單只會靠成交或你自己撤掉才消失 —— 它會一直佔著一個持倉名額。
             </p>
             <label style={{ marginTop: 12 }}>掛限價單被交易所拒絕時</label>
             <select value={limitRejected} onChange={(e) => setLimitRejected(e.target.value)}>

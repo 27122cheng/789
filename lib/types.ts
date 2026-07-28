@@ -265,6 +265,11 @@ export interface Settings {
       // message time, so a slow delivery does not add to the wait. Opens only:
       // an 加倉確認 is already the provider's post-confirmation message.
       entryDelaySeconds: number;
+      // Give up on an entry that has not filled this many hours after the
+      // signal: the resting order is cancelled on the exchange and the tracked
+      // position removed, freeing the symbol for a new signal. 0 = wait
+      // indefinitely (the order then only ever goes away by filling or by hand).
+      entryTimeoutHours: number;
       attachStopLoss: boolean;
       attachTakeProfit: boolean;
       // 分批止盈: close an equal share of the position at each TP target
@@ -356,6 +361,7 @@ export const DEFAULT_SETTINGS: Settings = {
       entryType: "market",
       limitRejected: "skip",
       entryDelaySeconds: 0,
+      entryTimeoutHours: 6,
       attachStopLoss: true,
       attachTakeProfit: true,
       splitTakeProfit: true,

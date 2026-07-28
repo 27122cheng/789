@@ -2488,3 +2488,75 @@ describe("leverage the instrument does not allow", () => {
     expect(rec?.message).toMatch(/設定槓桿 50x 失敗/);
   });
 });
+
+describe("the entry timeout is configurable", () => {
+  beforeEach(() => savePositions({}));
+
+  function stub() {
+    const cancelled: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      let data: any[] = [];
+      if (url.includes("/public/instruments")) {
+        data = [{ instId: "XRP-USDT-SWAP", ctVal: "1", lotSz: "1", minSz: "1", tickSz: "0.0001", lever: "20" }];
+      } else if (url.includes("/market/ticker")) data = [{ last: "2" }];
+      else if (url.includes("/account/positions")) data = [];
+      else if (url.includes("cancel-order")) {
+        cancelled.push(JSON.parse(init.body).ordId);
+        data = [{ sCode: "0" }];
+      } else if (url.includes("orders-pending")) {
+        data = [{ instId: "XRP-USDT-SWAP", ordId: "PEND-1" }];
+      } else if (url.includes("algo")) data = [];
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+    return cancelled;
+  }
+
+  function cfg(hours: number): Settings {
+    const c = settings();
+    c.exchange = "okx";
+    c.okx = {
+      apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false,
+    };
+    c.trading.liveTrading = true;
+    c.trading.orders.entryTimeoutHours = hours;
+    return c;
+  }
+
+  async function pendingSince(hoursAgo: number) {
+    await savePositions({
+      XRPUSDT: {
+        symbol: "XRPUSDT", side: "long", entryPrice: 1.8, qty: 0, originalQty: 0,
+        sizeUsdt: 50, leverage: 10, stopLoss: 1.7, takeProfits: [2.2],
+        tpCountOriginal: 1, tpHit: [], addCount: 0, pendingAdds: [],
+        openedAt: Date.now() - hoursAgo * 3_600_000,
+        dryRun: false, initialRisk: 0.1, rTargets: [], orderIds: ["PEND-1"],
+        pendingEntry: { target: 1.8, dir: "down", mode: "limit_order", orderId: "PEND-1", qty: 27 },
+      } as any,
+    });
+  }
+
+  it("uses the configured number of hours", async () => {
+    const cancelled = stub();
+    await pendingSince(2.5);
+    await monitorTick(cfg(2));                 // 2h limit, order is 2.5h old
+    expect((await getPositions())["XRPUSDT"]).toBeUndefined();
+    expect(cancelled).toContain("PEND-1");
+    const rec = (await getOrders()).find((o) => o.symbol === "XRPUSDT" && o.action === "cancel");
+    expect(rec?.message).toMatch(/2 小時未成交/);
+  });
+
+  it("keeps waiting below the configured limit", async () => {
+    stub();
+    await pendingSince(2.5);
+    await monitorTick(cfg(12));
+    expect((await getPositions())["XRPUSDT"]).toBeDefined();
+  });
+
+  it("0 means never expire", async () => {
+    stub();
+    await pendingSince(240);                   // ten days old
+    await monitorTick(cfg(0));
+    expect((await getPositions())["XRPUSDT"]).toBeDefined();
+  });
+});
