@@ -2401,3 +2401,90 @@ describe("deleting a position with orders resting on the exchange", () => {
     expect((await getPositions())["DOGEUSDT"]).toBeUndefined();
   });
 });
+
+describe("leverage the instrument does not allow", () => {
+  beforeEach(() => savePositions({}));
+
+  function stub(instrumentMax: string, levResult: "ok" | "reject") {
+    const calls: any[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any[] = [];
+      if (url.includes("/public/instruments")) {
+        data = [{
+          instId: "BLUR-USDT-SWAP", ctVal: "1", lotSz: "1", minSz: "1",
+          tickSz: "0.0001", lever: instrumentMax,
+        }];
+      } else if (url.includes("/market/ticker")) data = [{ last: "0.0143" }];
+      else if (url.includes("/account/set-leverage")) {
+        calls.push({ setLeverage: body.lever });
+        if (levResult === "reject") {
+          return {
+            ok: true, status: 200,
+            json: async () => ({ code: "1", msg: "", data: [{ sCode: "51004", sMsg: "leverage too high" }] }),
+          };
+        }
+        data = [{ lever: body.lever }];
+      } else if (url.includes("/account/positions")) data = [];
+      else if (url.includes("algo") || url.includes("orders-pending")) data = [];
+      else if (url.includes("/trade/order")) {
+        calls.push({ order: body });
+        data = [{ ordId: "OID-1", sCode: "0" }];
+      }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+    return calls;
+  }
+
+  function cfg(): Settings {
+    const c = settings();
+    c.exchange = "okx";
+    c.okx = {
+      apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false,
+    };
+    c.trading.liveTrading = true;
+    c.trading.risk.cooldownSeconds = 0;
+    c.trading.orders.entryType = "market";
+    // 10 USDT of MARGIN, so notional = 10 x whatever leverage ends up applying
+    c.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 10, percentBalance: 5, basis: "margin" };
+    c.trading.leverage = { default: 10, max: 50, whenUnspecified: "max" };
+    return c;
+  }
+
+  it("sizes against the instrument's ceiling, not the configured max", async () => {
+    // BLUR caps at 10x. Sizing 10 USDT margin at the configured 50x would ask
+    // for 500 USDT of notional, which at BLUR's real leverage needs far more
+    // margin than 10 - the exchange answers 51008 insufficient margin.
+    const calls = stub("10", "ok");
+    await handleIncomingMessage(
+      "BLURUSDT SHORT Entry: 0.0143 SL: 0.0150 TP1: 0.0130", meta(), cfg()
+    );
+    expect(calls.find((c) => c.setLeverage)?.setLeverage).toBe("10");
+    const pos = (await getPositions())["BLURUSDT"];
+    expect(pos.leverage).toBe(10);
+    expect(pos.sizeUsdt).toBeCloseTo(100, 6);       // 10 margin x 10x, not x50
+    const rec = (await getOrders()).find((o) => o.symbol === "BLURUSDT");
+    expect(rec?.message).toMatch(/最高 10x/);
+  });
+
+  it("leaves leverage alone when the instrument allows what was asked", async () => {
+    const calls = stub("100", "ok");
+    await handleIncomingMessage(
+      "BLURUSDT SHORT Entry: 0.0143 SL: 0.0150 TP1: 0.0130", meta(), cfg()
+    );
+    expect(calls.find((c) => c.setLeverage)?.setLeverage).toBe("50");
+    expect((await getPositions())["BLURUSDT"].sizeUsdt).toBeCloseTo(500, 6);
+  });
+
+  it("says so when setting the leverage fails, instead of trading silently", async () => {
+    // the order then goes out at whatever leverage the instrument already had,
+    // so the margin it needs is not the margin that was configured
+    stub("50", "reject");
+    await handleIncomingMessage(
+      "BLURUSDT SHORT Entry: 0.0143 SL: 0.0150 TP1: 0.0130", meta(), cfg()
+    );
+    const rec = (await getOrders()).find((o) => o.symbol === "BLURUSDT");
+    expect(rec?.message).toMatch(/設定槓桿 50x 失敗/);
+  });
+});

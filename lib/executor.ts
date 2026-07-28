@@ -345,10 +345,18 @@ async function placeEntry(
 
   // Venues where leverage is an instrument setting (OKX) need it applied
   // before the order, otherwise the position uses whatever was set last.
+  let levWarn = "";
   if (leverage && client.setLeverage) {
-    await client.setLeverage(perp, leverage).catch(() => {
-      /* non-fatal: the order still goes out at the account's current leverage */
-    });
+    try {
+      await client.setLeverage(perp, leverage);
+    } catch (err) {
+      // Non-fatal, but never silent: the order then goes out at whatever
+      // leverage the instrument currently has, and with margin-based sizing that
+      // changes how much margin it actually needs.
+      levWarn =
+        `；⚠️ 設定槓桿 ${leverage}x 失敗（${(err as Error).message}），` +
+        `交易所會沿用該合約目前的槓桿，實際所需保證金可能與設定不符`;
+    }
   }
 
   // Snap quantity to the contract's size step (round down) and lift it to the
@@ -427,7 +435,8 @@ async function placeEntry(
     orderIds: oid ? [oid] : [],
     note:
       `${entryType} ${side} order placed (qty ${qtyStr})${liftedNote}` +
-      (attached ? "；已附帶止盈止損" : ""),
+      (attached ? "；已附帶止盈止損" : "") +
+      levWarn,
     attached,
   };
 }
@@ -767,7 +776,22 @@ export async function executeSignal(
         if (!signal.side) {
           return; // incomplete signal (no direction) - drop silently
         }
-        const leverage = computeLeverage(settings, signal);
+        // The configured maximum is a preference; the instrument has a hard
+        // ceiling that is far lower on small caps than on BTC. With margin-based
+        // sizing the notional is margin x leverage, so asking for leverage the
+        // instrument does not allow makes the order need many times the intended
+        // margin - which the exchange refuses as 51008, insufficient margin.
+        let leverage = computeLeverage(settings, signal);
+        let levNote = "";
+        if (client.maxLeverage) {
+          const venueMax = await client.maxLeverage(sym).catch(() => null);
+          if (venueMax && leverage > venueMax) {
+            levNote =
+              `（${venueName(settings)} 對 ${sym} 最高 ${venueMax}x，` +
+              `槓桿自 ${leverage}x 下調為 ${venueMax}x）`;
+            leverage = venueMax;
+          }
+        }
         const sizeUsdt = await computeSizeUsdt(settings, signal, client, live, false, leverage);
         // align signal prices to Pionex precision: entry/SL up, TP down
         const aligned = await alignPrices(client, sym, {
@@ -913,7 +937,7 @@ export async function executeSignal(
             { symbol: sym, side: signal.side, sizeUsdt, qty: 0, price: aligned.entry, leverage },
             live, true,
             `延後掛單：訊號時間 +${delaySec} 秒後才掛（約 ${waitSec} 秒後，` +
-              `進場價 ${aligned.entry}，現價 ${refPrice}）`);
+              `進場價 ${aligned.entry}，現價 ${refPrice}）` + levNote);
           return;
         }
 
@@ -952,7 +976,9 @@ export async function executeSignal(
                 mode = "limit_order";
                 orderId = r.orderIds[0] ?? null;
                 pendQty = r.qty;
-                note = `已在 ${venueName(settings)} 掛限價單 @ ${aligned.entry}（現價 ${refPrice}）`;
+                note =
+                  `已在 ${venueName(settings)} 掛限價單 @ ${aligned.entry}（現價 ${refPrice}）` +
+                  levNote;
               } catch (err) {
                 const emsg = (err as Error).message;
                 // Watching the price ourselves is a much weaker substitute for a
@@ -1035,7 +1061,7 @@ export async function executeSignal(
           : null;
         await record("open",
           { symbol: sym, side: signal.side, sizeUsdt, qty: res.qty, price: res.price, leverage },
-          live, true, res.note + (stopNote ? `；${stopNote}` : ""), res.orderIds);
+          live, true, res.note + levNote + (stopNote ? `；${stopNote}` : ""), res.orderIds);
         return;
       }
 

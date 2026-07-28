@@ -62,6 +62,11 @@ export interface ExchangeClient {
   cancelAllOrders(venueSymbol: string): Promise<number>;
   /** Venues where leverage is set per instrument rather than per order. */
   setLeverage?(venueSymbol: string, leverage: number): Promise<void>;
+  /** The venue's own leverage ceiling for this instrument, which is far lower on
+   *  small caps than on BTC. The configured max is a preference; this is a hard
+   *  limit, and sizing against leverage the instrument does not allow asks the
+   *  exchange for more margin than intended. */
+  maxLeverage?(symbol: string): Promise<number | null>;
   /** Human description of how a base quantity maps to the venue's own order
    *  unit (OKX sells contracts, not coins), for the sizing preview. */
   describeOrderSize?(symbol: string, baseQty: number): Promise<string | null>;

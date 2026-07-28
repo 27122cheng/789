@@ -402,6 +402,13 @@ export class OkxClient implements ExchangeClient {
     return out;
   }
 
+  /** The instrument's own leverage ceiling (`lever` from the catalogue). */
+  async maxLeverage(symbol: string): Promise<number | null> {
+    const info = await this.infoOrNull(symbol);
+    const lever = Number(info?.lever);
+    return Number.isFinite(lever) && lever > 0 ? lever : null;
+  }
+
   async setLeverage(instId: string, leverage: number): Promise<void> {
     await this.request("POST", "/api/v5/account/set-leverage", {}, {
       instId, lever: String(leverage), mgnMode: this.tdMode,
