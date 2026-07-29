@@ -3,6 +3,7 @@ import { adminAuthMode, requireAdmin } from "@/lib/auth";
 import {
   getMonitorRun,
   getStopSnapshot,
+  getUntrackedSnapshot,
   getOrders,
   getPositions,
   getSettings,
@@ -27,13 +28,15 @@ export async function GET(req: NextRequest) {
   const denied = await requireAdmin(req);
   if (denied) return denied;
 
-  const [settings, positions, signals, orders, monitorRun, stopSnapshot] = await Promise.all([
+  const [settings, positions, signals, orders, monitorRun, stopSnapshot, untracked] =
+    await Promise.all([
     getSettings(),
     getPositions(),
     getSignals(),
     getOrders(),
     getMonitorRun(),
     getStopSnapshot(),
+    getUntrackedSnapshot(),
   ]);
 
   const exchangeKeys =
@@ -61,6 +64,15 @@ export async function GET(req: NextRequest) {
     exchangeStops: settings.trading.orders.exchangeStops !== false,
     monitorRun,
     stopSnapshot: stops,
+    untracked: untracked
+      ? {
+          at: untracked.at,
+          positions: untracked.positions.map((p) => ({
+            ...p,
+            symbol: normalizeVenueSymbol(p.symbol),
+          })),
+        }
+      : null,
     durableStore: hasDurableStore(),
     configured: {
       telegramBot: !!settings.telegram.botToken,

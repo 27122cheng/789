@@ -6,7 +6,14 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { dropPosition, handleIncomingMessage, monitorTick } from "../executor";
-import { getOrders, getPositions, getSignals, getTrades, savePositions } from "../store";
+import {
+  getOrders,
+  getPositions,
+  getSignals,
+  getTrades,
+  getUntrackedSnapshot,
+  savePositions,
+} from "../store";
 import { DEFAULT_SETTINGS, Settings } from "../types";
 
 function settings(): Settings {
@@ -2558,5 +2565,60 @@ describe("the entry timeout is configurable", () => {
     await pendingSince(240);                   // ten days old
     await monitorTick(cfg(0));
     expect((await getPositions())["XRPUSDT"]).toBeDefined();
+  });
+});
+
+describe("positions the exchange holds but the tracker does not", () => {
+  beforeEach(() => savePositions({}));
+
+  it("records them so the dashboard can show the real picture", async () => {
+    // a scale-out that left a remainder open, or a record deleted by hand: the
+    // coin is still held, unmanaged, and blocking its own next signal
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      let data: any[] = [];
+      if (url.includes("/public/instruments")) {
+        data = ["MASK", "ALGO", "FIL"].map((b) => ({
+          instId: `${b}-USDT-SWAP`, ctVal: "1", lotSz: "1", minSz: "1", tickSz: "0.0001", lever: "50",
+        }));
+      } else if (url.includes("/market/ticker")) data = [{ last: "0.34" }];
+      else if (url.includes("/account/positions")) {
+        data = [
+          { instId: "FIL-USDT-SWAP", pos: "-700", avgPx: "0.6912", posSide: "net" },
+          { instId: "MASK-USDT-SWAP", pos: "-159", avgPx: "0.3412", posSide: "net" },
+          { instId: "ALGO-USDT-SWAP", pos: "-10", avgPx: "0.07843", posSide: "net" },
+        ];
+      } else if (url.includes("orders-algo-pending")) data = [];
+      else if (url.includes("cancel-algos")) data = [{ sCode: "0" }];
+      else if (url.includes("orders-pending")) data = [];
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+
+    const cfg = settings();
+    cfg.exchange = "okx";
+    cfg.okx = {
+      apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false,
+    };
+    cfg.trading.liveTrading = true;
+
+    // only FIL is tracked; MASK and ALGO are not
+    await savePositions({
+      FILUSDT: {
+        symbol: "FILUSDT", side: "short", entryPrice: 0.6912, qty: 700, originalQty: 700,
+        sizeUsdt: 500, leverage: 50, stopLoss: 0.6968, takeProfits: [0.6733],
+        tpCountOriginal: 1, tpHit: [], addCount: 0, pendingAdds: [], openedAt: Date.now(),
+        dryRun: false, initialRisk: 0.005, rTargets: [], orderIds: [], pendingEntry: null,
+      } as any,
+    });
+
+    await monitorTick(cfg);
+
+    const snap = await getUntrackedSnapshot();
+    expect(snap).not.toBeNull();
+    const syms = snap!.positions.map((p) => p.symbol).sort();
+    expect(syms).toEqual(["ALGO-USDT-SWAP", "MASK-USDT-SWAP"]);
+    expect(snap!.positions.find((p) => p.symbol === "MASK-USDT-SWAP")).toMatchObject({
+      side: "short", qty: 159,
+    });
   });
 });

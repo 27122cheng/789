@@ -25,6 +25,7 @@ import {
   savePositions,
   setCooldown,
   setStopSnapshot,
+  setUntrackedSnapshot,
 } from "./store";
 import { OrderRecord, ParsedSignal, Position, Settings } from "./types";
 
@@ -1520,6 +1521,16 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
   const actions: string[] = [];
   let changed = false;
 
+  // Which symbols this app was managing when the tick STARTED. The exchange
+  // snapshot is read once, before the loop mutates anything, so a position
+  // closed during this tick would otherwise still be in that snapshot and get
+  // reported as untracked - a false alarm that clears itself a minute later.
+  const trackedAtStart = new Set(
+    Object.values(positions)
+      .filter((p) => !p.dryRun)
+      .map((p) => client.perpSymbol(p.symbol))
+  );
+
   // Give up on an unfilled entry after this long (orders.entryTimeoutHours);
   // 0 means never, so the comparison below must not treat it as "already due".
   const timeoutHours = settings.trading.orders.entryTimeoutHours ?? 6;
@@ -2188,6 +2199,29 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
         (bySymbol[o.symbol] ??= []).push({ kind: o.kind, trigger: o.trigger });
       }
       await setStopSnapshot({ at: Date.now(), bySymbol });
+
+      // The reverse of the orphan sweep: positions the EXCHANGE holds that this
+      // app has no record of. They arise when a close is booked while a
+      // remainder is still open - a scale-out whose slices did not add up, or a
+      // record deleted by hand. They are unmanaged, and worse, the duplicate
+      // guard refuses to open that symbol again while they exist, so the coin
+      // goes quiet with no visible reason. Record them for the dashboard.
+      await setUntrackedSnapshot({
+        at: Date.now(),
+        positions: held
+          .filter(
+            (h) =>
+              h.qty > 0 &&
+              !trackedSymbols.has(h.symbol) &&
+              !trackedAtStart.has(h.symbol)
+          )
+          .map((h) => ({
+            symbol: h.symbol,
+            side: h.side,
+            qty: h.qty,
+            entryPrice: h.entryPrice,
+          })),
+      });
 
       const orphans = stops.filter(
         (o) => !heldSymbols.has(o.symbol) && !trackedSymbols.has(o.symbol)

@@ -198,6 +198,35 @@ export default function Dashboard() {
         );
       })()}
 
+      {(state.untracked?.positions ?? []).length > 0 && (
+        <div className="banner live" style={{ marginBottom: 14 }}>
+          ⚠️ 交易所有 {state.untracked.positions.length} 筆持倉，本系統沒有追蹤
+          （{fmtTime(state.untracked.at)} 檢查）
+          <div style={{ overflowX: "auto", marginTop: 8 }}>
+            <table>
+              <thead>
+                <tr><th>幣種</th><th>方向</th><th>數量</th><th>開倉均價</th><th>交易所保護單</th></tr>
+              </thead>
+              <tbody>
+                {state.untracked.positions.map((p: any) => (
+                  <tr key={p.symbol}>
+                    <td className="mono">{p.symbol}</td>
+                    <SideCell side={p.side} />
+                    <td className="mono">{p.qty}</td>
+                    <td className="mono">{p.entryPrice}</td>
+                    <ProtectionCell list={state.stopSnapshot?.bySymbol?.[p.symbol]} />
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          這些倉位<b>不會被本系統管理</b>（不會移動止損、分批止盈、也不會平倉），
+          而且它們會<b>擋掉同幣種的新訊號</b> —— 開倉前的重複檢查看到交易所已有持倉就會略過。
+          <br />
+          最常見的來源是分批止盈後剩下的零頭。請到交易所自行平掉，或確認上面那欄還有止損在保護它。
+        </div>
+      )}
+
       <h2>目前持倉</h2>
       <div className="panel">
         {positions.length === 0 ? (

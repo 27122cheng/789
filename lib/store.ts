@@ -30,6 +30,7 @@ const K_LISTENER = KEY_PREFIX + "listenerSession";
 const K_MONITOR = KEY_PREFIX + "monitorRun";
 const K_TRADES = KEY_PREFIX + "trades";
 const K_STOPSNAP = KEY_PREFIX + "stopSnapshot";
+const K_UNTRACKED = KEY_PREFIX + "untrackedPositions";
 
 // 10 pages x 10 rows in the UI; oldest entries beyond this are dropped
 const MAX_LOG = 100;
@@ -209,6 +210,30 @@ export async function setStopSnapshot(snap: StopSnapshot): Promise<void> {
 
 export async function getStopSnapshot(): Promise<StopSnapshot | null> {
   return await kvGet<StopSnapshot>(K_STOPSNAP);
+}
+
+// ----------------------------------- positions the tracker does not know
+/** Positions the exchange holds that this app has no record of, as last seen by
+ *  the monitor. They are unmanaged - no trailing, no scale-out, no close - and
+ *  they block new signals on that symbol, because the duplicate guard refuses to
+ *  open when the exchange already holds the coin. Surfacing them is the only way
+ *  the dashboard can tell the truth about what is actually open. */
+export interface UntrackedSnapshot {
+  at: number;
+  positions: {
+    symbol: string;
+    side: "long" | "short";
+    qty: number;
+    entryPrice: number;
+  }[];
+}
+
+export async function setUntrackedSnapshot(snap: UntrackedSnapshot): Promise<void> {
+  await kvSet(K_UNTRACKED, snap);
+}
+
+export async function getUntrackedSnapshot(): Promise<UntrackedSnapshot | null> {
+  return await kvGet<UntrackedSnapshot>(K_UNTRACKED);
 }
 
 // ------------------------------------ listener login (Telethon) persistence
