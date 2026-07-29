@@ -5,7 +5,12 @@
  * ticker response where needed.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { dropPosition, handleIncomingMessage, monitorTick } from "../executor";
+import {
+  adoptPosition,
+  dropPosition,
+  handleIncomingMessage,
+  monitorTick,
+} from "../executor";
 import {
   getOrders,
   getPositions,
@@ -2620,5 +2625,136 @@ describe("positions the exchange holds but the tracker does not", () => {
     expect(snap!.positions.find((p) => p.symbol === "MASK-USDT-SWAP")).toMatchObject({
       side: "short", qty: 159,
     });
+  });
+});
+
+describe("a timed-out entry that actually filled", () => {
+  beforeEach(() => savePositions({}));
+
+  function cfg(): Settings {
+    const c = settings();
+    c.exchange = "okx";
+    c.okx = {
+      apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false,
+    };
+    c.trading.liveTrading = true;
+    c.trading.orders.entryTimeoutHours = 6;
+    return c;
+  }
+
+  async function staleEntry() {
+    await savePositions({
+      ZRXUSDT: {
+        symbol: "ZRXUSDT", side: "short", entryPrice: 0.07834, qty: 0, originalQty: 0,
+        sizeUsdt: 200, leverage: 20, stopLoss: 0.07897, takeProfits: [0.07644],
+        tpCountOriginal: 1, tpHit: [], addCount: 0, pendingAdds: [],
+        openedAt: Date.now() - 7 * 3_600_000,
+        dryRun: false, initialRisk: 0.0006, rTargets: [], orderIds: ["Z-1"],
+        pendingEntry: { target: 0.07834, dir: "up", mode: "limit_order", orderId: "Z-1", qty: 2550 },
+      } as any,
+    });
+  }
+
+  it("is not deleted when the positions snapshot cannot be read", async () => {
+    // the fill check is skipped without that snapshot, so expiring the record
+    // here would abandon a position that may well be open on the exchange
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (url.includes("/account/positions")) {
+        return { ok: true, status: 200, json: async () => ({ code: "50011", msg: "rate limited" }) };
+      }
+      let data: any[] = [];
+      if (url.includes("/public/instruments")) {
+        data = [{ instId: "ZRX-USDT-SWAP", ctVal: "1", lotSz: "1", minSz: "1", tickSz: "0.00001", lever: "20" }];
+      } else if (url.includes("/market/ticker")) data = [{ last: "0.0783" }];
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+    await staleEntry();
+    await monitorTick(cfg());
+    expect((await getPositions())["ZRXUSDT"]).toBeDefined();
+  });
+
+  it("is adopted, not expired, when the exchange shows it filled", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      let data: any[] = [];
+      if (url.includes("/public/instruments")) {
+        data = [{ instId: "ZRX-USDT-SWAP", ctVal: "1", lotSz: "1", minSz: "1", tickSz: "0.00001", lever: "20" }];
+      } else if (url.includes("/market/ticker")) data = [{ last: "0.0783" }];
+      else if (url.includes("/account/positions")) {
+        data = [{ instId: "ZRX-USDT-SWAP", pos: "-2550", avgPx: "0.07834", posSide: "net" }];
+      } else if (url.includes("algo") || url.includes("orders-pending")) data = [];
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+    await staleEntry();
+    await monitorTick(cfg());
+    const pos = (await getPositions())["ZRXUSDT"];
+    expect(pos).toBeDefined();
+    expect(pos.qty).toBe(2550);
+    expect(pos.pendingEntry).toBeNull();
+  });
+});
+
+describe("adopting an untracked exchange position", () => {
+  beforeEach(() => savePositions({}));
+
+  it("rebuilds the record from the exchange's own position and stops", async () => {
+    const sent: any[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      let data: any[] = [];
+      if (url.includes("/public/instruments")) {
+        data = [{ instId: "ZRX-USDT-SWAP", ctVal: "1", lotSz: "1", minSz: "1", tickSz: "0.00001", lever: "20" }];
+      } else if (url.includes("/account/positions")) {
+        data = [{ instId: "ZRX-USDT-SWAP", pos: "-2550", avgPx: "0.07834", posSide: "net" }];
+      } else if (url.includes("orders-algo-pending")) {
+        // an algo order has ONE ordType, so it comes back from one query only
+        data = url.includes("ordType=conditional")
+          ? [
+              { algoId: "A-1", instId: "ZRX-USDT-SWAP", slTriggerPx: "0.07897", sz: "2550" },
+              { algoId: "A-2", instId: "ZRX-USDT-SWAP", tpTriggerPx: "0.07644", sz: "2550" },
+            ]
+          : [];
+      } else if (init?.method === "POST") {
+        sent.push(url);
+      }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+    const c = settings();
+    c.exchange = "okx";
+    c.okx = {
+      apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false,
+    };
+    c.trading.liveTrading = true;
+
+    const res = await adoptPosition("ZRXUSDT", c);
+    expect(res.ok).toBe(true);
+    expect(res.stopLoss).toBe(0.07897);
+    expect(res.takeProfits).toEqual([0.07644]);
+
+    const pos = (await getPositions())["ZRXUSDT"];
+    expect(pos).toMatchObject({ side: "short", qty: 2550, entryPrice: 0.07834, dryRun: false });
+    expect(pos.initialRisk).toBeCloseTo(0.00063, 8);
+    // adoption must not trade: no orders placed, nothing cancelled
+    expect(sent).toHaveLength(0);
+  });
+
+  it("refuses when the exchange has no such position", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      let data: any[] = [];
+      if (url.includes("/public/instruments")) {
+        data = [{ instId: "ZRX-USDT-SWAP", ctVal: "1", lotSz: "1", minSz: "1", tickSz: "0.00001" }];
+      }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+    const c = settings();
+    c.exchange = "okx";
+    c.okx = {
+      apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false,
+    };
+    c.trading.liveTrading = true;
+    const res = await adoptPosition("ZRXUSDT", c);
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/沒有 ZRXUSDT 的持倉/);
   });
 });

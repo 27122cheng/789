@@ -99,6 +99,30 @@ export default function Dashboard() {
     }
   }
 
+  async function adoptPosition(p: any) {
+    const stops = state.stopSnapshot?.bySymbol?.[p.symbol] ?? [];
+    const hasSl = stops.some((o: any) => o.kind === "sl");
+    if (
+      !confirm(
+        `接管 ${p.symbol}（${p.side === "long" ? "多" : "空"} ${p.qty}）？\n\n` +
+          "會沿用交易所上現有的止損／止盈，不會下任何新單，也不會平倉。\n" +
+          "接管後本系統就會開始管理它（移動止損、分批止盈、平倉）。\n" +
+          (hasSl ? "" : "\n⚠️ 交易所上找不到這個幣種的止損單，接管後仍然沒有止損。\n")
+      )
+    ) {
+      return;
+    }
+    const { status, body } = await apiFetch("/api/positions/adopt", {
+      method: "POST",
+      body: JSON.stringify({ symbol: p.symbol }),
+    });
+    if (status === 200) {
+      await load();
+    } else {
+      alert(body?.error ?? `接管失敗 (HTTP ${status})`);
+    }
+  }
+
   async function clearLogs() {
     if (!confirm("確定清空所有紀錄？（訂單／動作紀錄與收到的訊息，不影響持倉與設定）")) return;
     const { status, body } = await apiFetch("/api/logs/clear", { method: "POST" });
@@ -205,7 +229,10 @@ export default function Dashboard() {
           <div style={{ overflowX: "auto", marginTop: 8 }}>
             <table>
               <thead>
-                <tr><th>幣種</th><th>方向</th><th>數量</th><th>開倉均價</th><th>交易所保護單</th></tr>
+                <tr>
+                  <th>幣種</th><th>方向</th><th>數量</th><th>開倉均價</th>
+                  <th>交易所保護單</th><th></th>
+                </tr>
               </thead>
               <tbody>
                 {state.untracked.positions.map((p: any) => (
@@ -215,6 +242,11 @@ export default function Dashboard() {
                     <td className="mono">{p.qty}</td>
                     <td className="mono">{p.entryPrice}</td>
                     <ProtectionCell list={state.stopSnapshot?.bySymbol?.[p.symbol]} />
+                    <td>
+                      <button onClick={() => adoptPosition(p)} style={{ padding: "2px 10px" }}>
+                        接管
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -223,7 +255,8 @@ export default function Dashboard() {
           這些倉位<b>不會被本系統管理</b>（不會移動止損、分批止盈、也不會平倉），
           而且它們會<b>擋掉同幣種的新訊號</b> —— 開倉前的重複檢查看到交易所已有持倉就會略過。
           <br />
-          最常見的來源是分批止盈後剩下的零頭。請到交易所自行平掉，或確認上面那欄還有止損在保護它。
+          按「<b>接管</b>」會沿用交易所上現有的止損／止盈把它交回本系統管理（不會下新單、不會平倉）；
+          如果只是分批止盈後剩下的零頭，直接到交易所平掉即可。
         </div>
       )}
 

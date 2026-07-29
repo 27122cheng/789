@@ -1434,6 +1434,105 @@ async function placeDeferredEntry(
 }
 
 /**
+ * Takes an untracked exchange position back under management.
+ *
+ * Everything needed is already on the exchange: side, size and entry price from
+ * the position itself, and the stop / targets from the protective orders resting
+ * against it. Nothing is ordered or cancelled here - the position keeps exactly
+ * the protection it has; this only gives the monitor a record to work from, so
+ * it resumes trailing, scaling out and closing, and so the symbol stops being
+ * blocked by its own untracked position.
+ */
+export async function adoptPosition(
+  symbol: string,
+  settings: Settings
+): Promise<{ ok: boolean; error?: string; stopLoss: number | null; takeProfits: number[] }> {
+  const empty = { stopLoss: null, takeProfits: [] as number[] };
+  if (!isLive(settings)) {
+    return { ok: false, error: "未啟用真實交易，無法接管交易所持倉", ...empty };
+  }
+  const client = makeClient(settings);
+  if (!client.fetchPositions) {
+    return { ok: false, error: `${venueName(settings)} 不支援查詢持倉`, ...empty };
+  }
+  const venue = client.perpSymbol(symbol);
+  const real = (await client.fetchPositions()).find(
+    (p) => p.symbol === venue && p.qty > 0
+  );
+  if (!real) {
+    return { ok: false, error: `交易所目前沒有 ${symbol} 的持倉`, ...empty };
+  }
+
+  const positions = await getPositions();
+  if (positions[symbol]) {
+    return { ok: false, error: `${symbol} 已經在追蹤中`, ...empty };
+  }
+
+  // Read the levels the position is actually protected by, rather than inventing
+  // new ones - re-deriving them from settings could place a stop the exchange
+  // does not have and manage the trade against the wrong risk.
+  let stopLoss: number | null = null;
+  let takeProfits: number[] = [];
+  if (client.fetchAllStopOrders) {
+    const stops = (await client.fetchAllStopOrders().catch(() => []))
+      .filter((o) => o.symbol === venue);
+    stopLoss = stops.find((o) => o.kind === "sl")?.trigger ?? null;
+    takeProfits = stops
+      .filter((o) => o.kind === "tp" && o.trigger != null)
+      .map((o) => o.trigger as number)
+      .sort((a, b) => (real.side === "long" ? a - b : b - a));
+  }
+
+  const initialRisk = stopLoss != null ? Math.abs(real.entryPrice - stopLoss) : null;
+  positions[symbol] = {
+    symbol,
+    side: real.side,
+    entryPrice: real.entryPrice,
+    qty: real.qty,
+    originalQty: real.qty,
+    sizeUsdt: real.qty * real.entryPrice,
+    leverage: settings.trading.leverage.default,
+    stopLoss,
+    takeProfits,
+    tpCountOriginal: takeProfits.length,
+    tpHit: [],
+    pendingAdds: [],
+    entryOrderType: settings.trading.orders.entryType,
+    beMoved: false,
+    initialRisk,
+    // The trade's history is unknown - which R levels already paid out cannot be
+    // recovered - so no scale-out plan is invented for it.
+    rTargets: [],
+    realizedPnl: 0,
+    closedQty: 0,
+    openedAt: Date.now(),
+    addCount: 0,
+    dryRun: false,
+    orderIds: [],
+    pendingEntry: null,
+  } as Position;
+  await savePositions(positions);
+  await appendOrder({
+    at: Date.now(),
+    action: "open",
+    symbol,
+    side: real.side,
+    sizeUsdt: real.qty * real.entryPrice,
+    qty: real.qty,
+    price: real.entryPrice,
+    leverage: settings.trading.leverage.default,
+    dryRun: false,
+    success: true,
+    message:
+      `接管交易所既有持倉（${real.qty} @ ${real.entryPrice}），` +
+      `沿用交易所上的保護單：SL ${stopLoss ?? "無"} / TP ${takeProfits.join("/") || "無"}` +
+      (stopLoss == null ? "；⚠️ 交易所上找不到止損，請自行確認" : ""),
+    orderIds: [],
+  });
+  return { ok: true, stopLoss, takeProfits };
+}
+
+/**
  * Removes ONE tracked position, for the dashboard's per-row delete.
  *
  * Deliberately does not touch a real open position: the exchange is the source
@@ -1640,6 +1739,17 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
       const mode = pos.pendingEntry.mode ?? "watch"; // legacy positions: watch
       if (Date.now() - pos.openedAt > pendingTimeoutMs) {
         const hours = timeoutHours;
+        // "Not filled" has to be a fact, not an assumption. The fill check above
+        // adopts the position when the exchange holds it, but it is skipped
+        // whenever the positions snapshot could not be read this tick - and then
+        // this branch would delete the record of an entry that DID fill, leaving
+        // a live position nothing manages. Only expire what can be verified.
+        if (live && !pos.dryRun && client.fetchPositions) {
+          if ((await realPositions()) == null) {
+            actions.push(`${sym}: 逾時但無法確認交易所是否已成交，保留追蹤，下次再試`);
+            continue;
+          }
+        }
         // The resting order must be gone from the exchange BEFORE the record
         // is: dropping the record while the order still rests would leave it to
         // fill hours later into a position nothing manages. A failed cancel
