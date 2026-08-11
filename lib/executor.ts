@@ -487,8 +487,27 @@ function entryProtection(
   entry: number,
   stopLoss: number | null,
   qty: number,
-  takeProfits: number[]
+  takeProfits: number[],
+  /** The share each target closes, when the PROVIDER stated it. Its own split
+   *  wins over the configured R levels: the rest of its messages assume it. */
+  percents: (number | null)[] = []
 ): { price: number; size: number }[] {
+  if (percents.some((p) => p != null) && takeProfits.length) {
+    const out: { price: number; size: number }[] = [];
+    let left = qty;
+    takeProfits.forEach((price, i) => {
+      if (left <= 0) return;
+      const pct = percents[i];
+      // the last target, and any target with no stated share, takes the rest
+      const last = i === takeProfits.length - 1;
+      const size = last || pct == null ? left : Math.min(left, (qty * pct) / 100);
+      if (size > 0) {
+        out.push({ price, size });
+        left -= size;
+      }
+    });
+    return out;
+  }
   const dir = side === "long" ? 1 : -1;
   const rt = settings.trading.orders.rTakeProfit;
   const rApplies =
@@ -536,13 +555,18 @@ function tpSlices(
   if (settings.trading.orders.splitTakeProfit === false) {
     return [{ price: tps[0], size: pos.qty }];
   }
+  // A provider that states its own shares (「止盈一…減倉 60%」) overrides the
+  // equal split, measured against the ORIGINAL size like the equal split is.
+  const pcts = pos.tpPercents ?? [];
   const share =
     pos.tpCountOriginal > 0 ? pos.originalQty / pos.tpCountOriginal : pos.qty;
   const out: { price: number; size: number }[] = [];
   let left = pos.qty;
   tps.forEach((price, i) => {
     if (left <= 0) return;
-    const size = i === tps.length - 1 ? left : Math.min(left, share);
+    const pct = pcts[i];
+    const slice = pct != null ? (pos.originalQty * pct) / 100 : share;
+    const size = i === tps.length - 1 ? left : Math.min(left, slice);
     if (size > 0) {
       out.push({ price, size });
       left -= size;
@@ -817,6 +841,11 @@ export async function executeSignal(
             ? [...aligned.takeProfits].sort((a, b) =>
                 signal.side === "long" ? a - b : b - a)
             : [],
+          // targets are stored nearest-first, the same order the signal lists
+          // 止盈一/止盈二 in, so the stated shares line up with them
+          tpPercents: settings.trading.orders.attachTakeProfit
+            ? signal.takeProfitPercents
+            : [],
           tpCountOriginal: signal.takeProfits.length,
           pendingAdds: signal.addLevels
             .slice(0, maxAdds)
@@ -968,7 +997,7 @@ export async function executeSignal(
                           entryProtection(
                             settings, signal.side, aligned.entry!, slForRisk,
                             aligned.entry! > 0 ? sizeUsdt / aligned.entry! : 0,
-                            common.takeProfits
+                            common.takeProfits, signal.takeProfitPercents
                           )
                         ),
                       }
@@ -1030,7 +1059,10 @@ export async function executeSignal(
         const plannedQty = plannedEntry > 0 ? sizeUsdt / plannedEntry : 0;
         const tpPlan = await alignPlan(
           client, sym,
-          entryProtection(settings, signal.side, plannedEntry, slForRisk, plannedQty, common.takeProfits)
+          entryProtection(
+            settings, signal.side, plannedEntry, slForRisk, plannedQty,
+            common.takeProfits, signal.takeProfitPercents
+          )
         );
         const res = await placeEntry(
           client, live, sym, signal.side, sizeUsdt, "market", null, refPrice ?? aligned.entry, leverage,
@@ -1107,7 +1139,7 @@ export async function executeSignal(
                     entryProtection(
                       settings, p.side, addLevel, p.stopLoss,
                       addLevel > 0 ? sizeUsdt / addLevel : 0,
-                      p.takeProfits
+                      p.takeProfits, p.tpPercents ?? []
                     )
                   ),
                 }
@@ -1158,7 +1190,7 @@ export async function executeSignal(
                   entryProtection(
                     settings, p.side, refPrice ?? p.entryPrice, p.stopLoss,
                     (refPrice ?? p.entryPrice) > 0 ? sizeUsdt / (refPrice ?? p.entryPrice) : 0,
-                    p.takeProfits
+                    p.takeProfits, p.tpPercents ?? []
                   )
                 ),
               }
@@ -1359,7 +1391,8 @@ async function placeDeferredEntry(
           client, sym,
           entryProtection(
             settings, pos.side, target, pos.stopLoss,
-            target > 0 ? pos.sizeUsdt / target : 0, pos.takeProfits
+            target > 0 ? pos.sizeUsdt / target : 0,
+            pos.takeProfits, pos.tpPercents ?? []
           )
         ),
       }

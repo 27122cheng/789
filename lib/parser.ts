@@ -125,6 +125,13 @@ const UPGRADE_MARKERS = /長線單升級|长线单升级|升級信號|升级信�
 // unmistakable "adjust the stop" phrasing used by signal bots
 const SL_ADJUST_MARKERS =
   /新止損|新止损|建議止損調整|建议止损调整|追蹤止損|追踪止损|移動止損|移动止损/;
+// 快進快出 announces stop moves as「止損上移至 $0.265382（鎖 +0.5R）」and
+// breakeven moves as「移到保本」, neither of which reads as an adjustment above.
+const SL_MOVE_MARKERS =
+  /(?:止損|止损)\s*(?:已\s*)?(?:上移|下移|移至|移到|上調|上调|調整至|调整至)|移到保本|移至保本|移動到保本/;
+// The provider labels a finished trade outright. This wins over everything
+// else in the body - a close reason may itself mention 止盈 or 止損上移.
+const TRADE_END_MARKERS = /交易結束|交易结束/;
 // messages reporting a finished trade (must not be read as a fresh open)
 const CLOSED_MARKERS =
   /已平倉|已平仓|已止盈|已止損|已止损|止盈.{0,6}(?:觸及|触及|達成|达成)|(?:觸及|触及|達成|达成).{0,6}止盈|獲利了結|获利了结|獲利離場|获利离场/;
@@ -264,6 +271,31 @@ function extractTakeProfits(norm: string): number[] {
   return values;
 }
 
+/**
+ * 「止盈一： $0.334719 (1.5R，減倉 60%)」-> how much of the position each target
+ * closes, when the provider states it. Aligned with extractTakeProfits' order,
+ * with null where a target carries no percentage. Following the provider's own
+ * split beats inventing one: it is what the rest of its messages assume.
+ */
+function extractTakeProfitPercents(norm: string): (number | null)[] {
+  const out: (number | null)[] = [];
+  const re = new RegExp(
+    `(?:最終止盈|最终止盈|止盈[一二三四五六七八九\\d]|tp\\s*\\d|take\\s*profit\\s*\\d)` +
+      `\\s*[:：]?\\s*\\$?(${NUM.source})([^\\n]*)`,
+    "gi"
+  );
+  const seen = new Set<number>();
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(norm)) !== null) {
+    const v = parseNum(m[1]);
+    if (seen.has(v)) continue;
+    seen.add(v);
+    const pct = m[2].match(/(?:減倉|减仓|減碼|减码|平倉|平仓)\s*([\d.]+)\s*%/);
+    out.push(pct ? parseFloat(pct[1]) : null);
+  }
+  return out;
+}
+
 function extractStopLoss(norm: string, allowLoose: boolean): number | null {
   // explicit "new stop" label wins: 新止損： $0.237906
   let m = new RegExp(
@@ -351,8 +383,25 @@ export function parseSignal(
       norm
     );
 
+  // A message carrying an entry price, a stop AND targets, with entry wording,
+  // is an open - even when its body also explains how the stop will be managed
+  // later (「浮盈達 +0.6R 自動移到保本」). Judged before the stop-move rules so
+  // that explanatory text cannot turn a fresh signal into an adjustment.
+  const addFamily =
+    ADD_CANCEL_MARKERS.test(norm) ||
+    ADD_FILLED_MARKERS.test(norm) ||
+    ADD_CONFIRM_MARKERS.test(norm) ||
+    ADD_PLAN_MARKERS.test(norm);
+  const isFullSetup = hasEntry && hasSl && hasTp && entrySetupMarker && !addFamily;
+
   if (ADD_CANCEL_MARKERS.test(norm)) {
     action = "add_cancel";
+  } else if (TRADE_END_MARKERS.test(norm)) {
+    action = "close";
+  } else if (isFullSetup && !TRADE_END_MARKERS.test(norm)) {
+    action = "open";
+  } else if (SL_MOVE_MARKERS.test(norm)) {
+    action = "update_sl";
   } else if (ADD_FILLED_MARKERS.test(norm) && findKeyword(ADD_KEYWORDS, lower) >= 0) {
     action = "update_sl";
   } else if (findKeyword(CANCEL_KEYWORDS, lower) >= 0) {
@@ -432,6 +481,7 @@ export function parseSignal(
     entryPrice: addLimit ?? entry.low,
     entryPriceHigh: addLimit != null ? null : entry.high,
     takeProfits,
+    takeProfitPercents: action === "open" ? extractTakeProfitPercents(norm) : [],
     stopLoss,
     stopLossAfterFill: addStopAfterFill,
     stopLossBreakeven: breakeven,

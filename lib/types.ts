@@ -16,6 +16,10 @@ export interface ParsedSignal {
   entryPrice: number | null;
   entryPriceHigh: number | null;
   takeProfits: number[];
+  // What share of the position each target closes, when the provider spells it
+  // out (「止盈一：$X (1.5R，減倉 60%)」). null where it does not, and empty when
+  // no target carries one - the configured R levels then decide the split.
+  takeProfitPercents: (number | null)[];
   stopLoss: number | null;
   // 「成交後止損改至 X」on an add: applies only when that tranche FILLS, never
   // before - arming it early could close the position at a level that was not
@@ -65,6 +69,10 @@ export interface Position {
   sizeUsdt: number;
   stopLoss: number | null;
   takeProfits: number[];       // remaining TP targets
+  /** The share each remaining target closes, when the provider stated it
+   *  (「止盈一…減倉 60%」). Kept alongside takeProfits so re-placing the exchange
+   *  orders later still splits the position the way the signal asked. */
+  tpPercents?: (number | null)[];
   tpCountOriginal: number;
   pendingAdds: PendingAdd[];   // 加倉計劃 levels not yet filled
   entryOrderType: "market" | "limit";
