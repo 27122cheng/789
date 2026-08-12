@@ -2758,3 +2758,42 @@ describe("adopting an untracked exchange position", () => {
     expect(res.error).toMatch(/沒有 ZRXUSDT 的持倉/);
   });
 });
+
+describe("a signal a risk rule blocked", () => {
+  beforeEach(() => savePositions({}));
+
+  it("says which rule stopped it instead of vanishing", async () => {
+    // silence here is what makes "why did nothing happen?" unanswerable: the
+    // signal shows up in the received list and then simply never trades
+    stubFetchPrice(100);
+    const cfg = settings();
+    cfg.trading.risk.maxOpenPositions = 1;
+    cfg.trading.risk.cooldownSeconds = 0;
+
+    await handleIncomingMessage("AAVEUSDT LONG Entry: 100 SL: 90 TP1: 130", meta(), cfg);
+    expect((await getPositions())["AAVEUSDT"]).toBeDefined();
+
+    // the slot is now full, so this one is refused
+    await handleIncomingMessage("COMPUSDT LONG Entry: 100 SL: 90 TP1: 130", meta(), cfg);
+    expect((await getPositions())["COMPUSDT"]).toBeUndefined();
+
+    const rec = (await getOrders()).find((o) => o.symbol === "COMPUSDT");
+    expect(rec).toBeDefined();
+    expect(rec!.success).toBe(false);
+    expect(rec!.message).toMatch(/同時最多持倉數 1/);
+  });
+
+  it("names the symbol already held rather than staying quiet", async () => {
+    stubFetchPrice(100);
+    const cfg = settings();
+    cfg.trading.risk.maxOpenPositions = 20;
+    cfg.trading.risk.cooldownSeconds = 0;
+
+    await handleIncomingMessage("MKRUSDT LONG Entry: 100 SL: 90 TP1: 130", meta(), cfg);
+    await handleIncomingMessage("MKRUSDT LONG Entry: 100 SL: 90 TP1: 130", meta(), cfg);
+    const rec = (await getOrders()).find(
+      (o) => o.symbol === "MKRUSDT" && !o.success
+    );
+    expect(rec?.message).toMatch(/已經有持倉／掛單/);
+  });
+});

@@ -14,7 +14,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
 import { handleIncomingMessage } from "@/lib/executor";
-import { getSettings } from "@/lib/store";
+import { appendWebhookEvent, getSettings } from "@/lib/store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -36,24 +36,46 @@ export async function POST(req: NextRequest) {
   }
 
   const text = (body.text ?? "").toString();
-  if (!text.trim()) return NextResponse.json({ ok: true, skipped: "empty" });
+  const chatId = String(body.chatId ?? "listener");
+
+  // Every delivery is logged to the same diagnostic list the bot webhook uses.
+  // Without this the listener - the path signals ACTUALLY arrive by - left no
+  // trace at all, so "nothing is trading" could not be told apart from
+  // "nothing is arriving", and the diagnostics page showed only bot traffic.
+  const ev = {
+    at: Date.now(),
+    updateType: "listener",
+    chatId,
+    chatTitle: null,
+    chatType: "listener" as const,
+    chatUsername: null,
+    fromBot: false,
+    outcome: "accepted" as const,
+    detail: "由監聽器（你的 Telegram 帳號）轉送",
+    textPreview: text.slice(0, 160),
+  };
+
+  if (!text.trim()) {
+    await appendWebhookEvent({ ...ev, outcome: "empty_text", detail: "監聽器送來的訊息沒有文字" });
+    return NextResponse.json({ ok: true, skipped: "empty" });
+  }
 
   const settings = await getSettings();
   try {
     await handleIncomingMessage(
       text,
       {
-        chatId: String(body.chatId ?? "listener"),
+        chatId,
         messageId: Number(body.messageId ?? Date.now()),
         timestamp: Number(body.timestamp ?? Date.now()),
       },
       settings
     );
   } catch (err) {
-    return NextResponse.json(
-      { error: (err as Error).message },
-      { status: 500 }
-    );
+    const msg = (err as Error).message;
+    await appendWebhookEvent({ ...ev, outcome: "error", detail: `處理失敗：${msg}` });
+    return NextResponse.json({ error: msg }, { status: 500 });
   }
+  await appendWebhookEvent(ev);
   return NextResponse.json({ ok: true });
 }

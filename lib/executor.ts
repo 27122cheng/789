@@ -270,12 +270,15 @@ function riskReject(
 
   const wl = risk.symbolWhitelist.map((s) => s.toUpperCase()).filter(Boolean);
   const bl = risk.symbolBlacklist.map((s) => s.toUpperCase()).filter(Boolean);
-  if (wl.length && !wl.includes(sym)) return `${sym} not in whitelist`;
-  if (bl.includes(sym)) return `${sym} is blacklisted`;
+  if (wl.length && !wl.includes(sym)) return `${sym} 不在白名單內，未交易`;
+  if (bl.includes(sym)) return `${sym} 在黑名單內，未交易`;
 
   const ageSec = (Date.now() - signal.timestamp) / 1000;
   if (ageSec > risk.maxSignalAgeSeconds)
-    return `signal is ${Math.round(ageSec)}s old (max ${risk.maxSignalAgeSeconds}s)`;
+    return (
+      `訊號已經過期 ${Math.round(ageSec)} 秒（上限 ${risk.maxSignalAgeSeconds} 秒），未交易。` +
+      `若訊號本來就有延遲，請到設定調高「訊號最大延遲秒數」`
+    );
 
   const last = cooldowns[sym];
   if (
@@ -288,24 +291,27 @@ function riskReject(
     // provider's own sequence, and management signals (stop moves, fills,
     // cancels, closes) must always get through - a blocked stop update is a
     // risk, not a duplicate. Re-delivery is already handled by dedup.
-    return `cooldown active for ${sym}`;
+    return `${sym} 還在冷卻時間內（${risk.cooldownSeconds} 秒），未重複進場`;
   }
 
   if (signal.action === "open") {
-    if (positions[sym]) return `position already open for ${sym}`;
+    if (positions[sym]) return `${sym} 已經有持倉／掛單，未重複進場`;
     if (Object.keys(positions).length >= risk.maxOpenPositions)
-      return `max open positions reached (${risk.maxOpenPositions})`;
+      return (
+        `已達同時最多持倉數 ${risk.maxOpenPositions}，這筆訊號未交易。` +
+        `請先平掉或刪除一筆，或到設定調高上限`
+      );
     if (
       risk.requireEntryAndSl &&
       (signal.entryPrice === null || signal.stopLoss === null)
     )
-      return "open signal has no entry price or stop loss (requireEntryAndSl)";
+      return "訊號缺少進場價或止損，依設定「必須有進場價與止損」未交易";
   }
   if (signal.action === "add") {
     const pos = positions[sym];
-    if (!pos) return `no open position for ${sym} to add to`;
+    if (!pos) return `${sym} 沒有持倉可加倉`;
     if (pos.addCount >= risk.maxAddsPerPosition)
-      return `max adds per position reached (${risk.maxAddsPerPosition})`;
+      return `${sym} 已達單筆最多加倉次數 ${risk.maxAddsPerPosition}`;
   }
   return null;
 }
@@ -792,6 +798,13 @@ export async function executeSignal(
   // failures (Pionex API errors) below ARE still recorded.
   const reject = riskReject(settings, signal, positions, cooldowns);
   if (reject) {
+    // Recorded, not silent. These are deliberate no-trades, but silence is what
+    // makes "why did nothing happen?" unanswerable - the signal shows up in the
+    // received-messages list and then simply never becomes an order, with no
+    // trace of the rule that stopped it.
+    await record(signal.action,
+      { symbol: sym, side: signal.side, sizeUsdt: 0, qty: 0, price: signal.entryPrice, leverage: 0 },
+      live, false, reject);
     return;
   }
 
