@@ -2847,3 +2847,94 @@ describe("51008 carries its own diagnosis", () => {
     expect(rec?.message).toMatch(/要求 50x/);
   });
 });
+
+describe("a target the market already ran past", () => {
+  beforeEach(() => savePositions({}));
+
+  function okxStub(orders: any[], price: string) {
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any[] = [];
+      if (url.includes("/public/instruments")) {
+        data = [{ instId: "ONDO-USDT-SWAP", ctVal: "10", lotSz: "1", minSz: "1", tickSz: "0.0001", lever: "50" }];
+      } else if (url.includes("/market/ticker")) data = [{ last: price }];
+      else if (url.includes("/account/set-leverage")) data = [{ lever: "20" }];
+      else if (url.includes("/account/positions")) data = [];
+      else if (url.includes("algo") || url.includes("orders-pending")) data = [];
+      else if (url.includes("/trade/order")) {
+        orders.push(body);
+        data = [{ ordId: `OID-${orders.length}`, sCode: "0" }];
+      }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+  }
+
+  function cfg(): Settings {
+    const c = settings();
+    c.exchange = "okx";
+    c.okx = {
+      apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false,
+    };
+    c.trading.liveTrading = true;
+    c.trading.risk.cooldownSeconds = 0;
+    c.trading.orders.entryType = "market";
+    c.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 10, percentBalance: 5, basis: "margin" };
+    c.trading.leverage = { default: 10, max: 20, whenUnspecified: "max" };
+    return c;
+  }
+
+  it("is dropped from the attached plan instead of sinking the whole order", async () => {
+    // short at 0.334: the market fell PAST 止盈一 (0.3347) before the order went
+    // out, so that target now sits on the wrong side - attaching it is OKX 51050
+    const orders: any[] = [];
+    okxStub(orders, "0.334");
+    await handleIncomingMessage(
+      "⚡ 快進快出訊號 — ONDO ▼ 做空\n進場： $0.3381 (市價)\n止損： $0.340354\n" +
+        "止盈一： $0.334719 (1.5R，減倉 60%)\n止盈二： $0.333592 (2R)",
+      meta(), cfg()
+    );
+    expect(orders).toHaveLength(1);
+    const tps = (orders[0].attachAlgoOrds ?? []).filter((a: any) => a.tpTriggerPx);
+    // 止盈一 is gone; 止盈二 (still below price) takes the whole position
+    expect(tps).toHaveLength(1);
+    expect(Number(tps[0].tpTriggerPx)).toBeCloseTo(0.3335, 3);
+    // the stop must survive the pruning
+    expect((orders[0].attachAlgoOrds ?? []).some((a: any) => a.slTriggerPx)).toBe(true);
+  });
+
+  it("51050 from the venue is retried bare rather than losing the trade", async () => {
+    // belt and braces for the same situation arising server-side (slippage)
+    const orders: any[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any[] = [];
+      if (url.includes("/public/instruments")) {
+        data = [{ instId: "ONDO-USDT-SWAP", ctVal: "10", lotSz: "1", minSz: "1", tickSz: "0.0001", lever: "50" }];
+      } else if (url.includes("/market/ticker")) data = [{ last: "0.3381" }];
+      else if (url.includes("/account/set-leverage")) data = [{ lever: "20" }];
+      else if (url.includes("/account/positions")) data = [];
+      else if (url.includes("algo") || url.includes("orders-pending")) data = [];
+      else if (url.includes("/trade/order")) {
+        orders.push(body);
+        if (body.attachAlgoOrds) {
+          return {
+            ok: true, status: 200,
+            json: async () => ({ code: "1", msg: "", data: [{ sCode: "51050", sMsg: "Your TP price should be higher than the primary order price." }] }),
+          };
+        }
+        data = [{ ordId: "OID-BARE", sCode: "0" }];
+      }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+    await handleIncomingMessage(
+      "ONDOUSDT LONG Entry: 0.3381 SL: 0.33 TP1: 0.35", meta(), cfg()
+    );
+    // first send carried the attachment and was refused; the bare retry traded
+    expect(orders).toHaveLength(2);
+    expect(orders[1].attachAlgoOrds).toBeUndefined();
+    const pos = (await getPositions())["ONDOUSDT"];
+    expect(pos).toBeDefined();
+    expect(pos.qty).toBeGreaterThan(0);
+  });
+});

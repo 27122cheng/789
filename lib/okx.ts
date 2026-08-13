@@ -37,6 +37,14 @@ function stepDecimals(step: number): number | null {
  *  fall back to another entry method. */
 export const NO_CONTRACT = "OKX 沒有這個永續合約：";
 
+/** Codes meaning the ATTACHED TP/SL was invalid while the order itself was
+ *  fine: 51076 (TP+SL combined in one entry), 51277-51280 (trigger price on the
+ *  wrong side of the mark), 51050-51053 (trigger price on the wrong side of the
+ *  ORDER price - e.g. the market ran past the signal's first target before the
+ *  order was sent). All retryable bare: losing the trade over an unattachable
+ *  target is worse, and the monitor lays the still-valid levels afterwards. */
+const ATTACH_REJECT_RE = /\b(51076|5105[0-3]|51277|51278|51279|51280)\b|attachAlgo/i;
+
 export class OkxApiError extends Error {
   code?: string;
   payload?: Record<string, unknown>;
@@ -537,7 +545,7 @@ export class OkxClient implements ExchangeClient {
       // Distinguish "the attached TP/SL was invalid" from "the order was
       // invalid": the former can be retried bare so the trade still happens.
       const msg = (e as Error).message;
-      if (body.attachAlgoOrds && /\b(51076|51277|51278|51279|51280)\b|attachAlgo/i.test(msg)) {
+      if (body.attachAlgoOrds && ATTACH_REJECT_RE.test(msg)) {
         throw new AttachRejectedError(msg);
       }
       throw e;
@@ -546,7 +554,7 @@ export class OkxClient implements ExchangeClient {
     // a per-order failure can still arrive under a top-level code of "0"
     if (first.sCode !== undefined && String(first.sCode) !== "0") {
       const msg = `OKX API error (${first.sCode}): ${first.sMsg ?? ""}`;
-      if (body.attachAlgoOrds && /\b(51076|51277|51278|51279|51280)\b|attachAlgo/i.test(msg)) {
+      if (body.attachAlgoOrds && ATTACH_REJECT_RE.test(msg)) {
         throw new AttachRejectedError(msg);
       }
       throw new OkxApiError(msg, String(first.sCode), first);

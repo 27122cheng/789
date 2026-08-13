@@ -526,16 +526,23 @@ function entryProtection(
   percents: (number | null)[] = []
 ): { price: number; size: number }[] {
   if (percents.some((p) => p != null) && takeProfits.length) {
+    // A fast market can run past the nearest target before the order is even
+    // sent (scalp signals name market entries). A target on the wrong side of
+    // the entry is unplaceable - OKX rejects the whole order with 51050 - and
+    // meaningless anyway, so it is dropped and its share rolls into the next
+    // one. If nothing survives, no target is attached; the stop still is.
+    const reachable = takeProfits
+      .map((price, i) => ({ price, pct: percents[i] ?? null }))
+      .filter((t) => (side === "long" ? t.price > entry : t.price < entry));
     const out: { price: number; size: number }[] = [];
     let left = qty;
-    takeProfits.forEach((price, i) => {
+    reachable.forEach((t, i) => {
       if (left <= 0) return;
-      const pct = percents[i];
       // the last target, and any target with no stated share, takes the rest
-      const last = i === takeProfits.length - 1;
-      const size = last || pct == null ? left : Math.min(left, (qty * pct) / 100);
+      const last = i === reachable.length - 1;
+      const size = last || t.pct == null ? left : Math.min(left, (qty * t.pct) / 100);
       if (size > 0) {
-        out.push({ price, size });
+        out.push({ price: t.price, size });
         left -= size;
       }
     });
