@@ -422,6 +422,29 @@ async function placeEntry(
     return client.placeOrder({ ...common, type: "MARKET", ...extra });
   };
 
+  // 51008 keeps coming back with plausible-looking sizes, so a bare
+  // "insufficient margin" is not enough to act on. Attach the three numbers
+  // that decide it - available balance, this order's notional, and the leverage
+  // the VENUE is actually applying (its per-contract setting defaults low on
+  // instruments never traded by hand, and margin is charged against that, not
+  // against what was requested).
+  const explainMargin = async (err: Error): Promise<Error> => {
+    if (!/\b51008\b|[Ii]nsufficient .*margin/.test(err.message)) return err;
+    const avail = await client.getAvailableUsdt().catch(() => null);
+    const realLev = client.currentLeverage
+      ? await client.currentLeverage(perp).catch(() => null)
+      : null;
+    const notional = qty * price;
+    const need = realLev ? notional / realLev : null;
+    err.message +=
+      `【診斷：可用 ${avail != null ? avail.toFixed(2) : "查詢失敗"} USDT；` +
+      `此單名目 ${notional.toFixed(2)} USDT；` +
+      `交易所此合約目前實際槓桿 ${realLev ?? "查詢失敗"}x` +
+      (need != null ? `，需保證金約 ${need.toFixed(2)} USDT` : "") +
+      `；本次要求 ${leverage ?? "-"}x】`;
+    return err;
+  };
+
   try {
     resp = await send(true);
   } catch (err) {
@@ -430,9 +453,13 @@ async function placeEntry(
     // protection separately.
     if (err instanceof AttachRejectedError) {
       attached = false;
-      resp = await send(false);
+      try {
+        resp = await send(false);
+      } catch (err2) {
+        throw await explainMargin(err2 as Error);
+      }
     } else {
-      throw err;
+      throw await explainMargin(err as Error);
     }
   }
   const oid = resp.orderId;

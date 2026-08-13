@@ -409,6 +409,21 @@ export class OkxClient implements ExchangeClient {
     return Number.isFinite(lever) && lever > 0 ? lever : null;
   }
 
+  /** The leverage the venue is really applying to this instrument - the number
+   *  margin is charged against. Asking beats assuming: OKX keeps a per-contract
+   *  setting that defaults low on instruments never traded by hand. */
+  async currentLeverage(instId: string): Promise<number | null> {
+    try {
+      const rows = await this.request("GET", "/api/v5/account/leverage-info", {
+        instId, mgnMode: this.tdMode,
+      });
+      const lever = Number(rows[0]?.lever);
+      return Number.isFinite(lever) && lever > 0 ? lever : null;
+    } catch {
+      return null;
+    }
+  }
+
   async setLeverage(instId: string, leverage: number): Promise<void> {
     await this.request("POST", "/api/v5/account/set-leverage", {}, {
       instId, lever: String(leverage), mgnMode: this.tdMode,

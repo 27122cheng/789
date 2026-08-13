@@ -67,6 +67,9 @@ export interface ExchangeClient {
    *  limit, and sizing against leverage the instrument does not allow asks the
    *  exchange for more margin than intended. */
   maxLeverage?(symbol: string): Promise<number | null>;
+  /** The leverage ACTUALLY in effect on the venue for this instrument right
+   *  now - which is what margin is charged against, whatever was requested. */
+  currentLeverage?(venueSymbol: string): Promise<number | null>;
   /** Human description of how a base quantity maps to the venue's own order
    *  unit (OKX sells contracts, not coins), for the sizing preview. */
   describeOrderSize?(symbol: string, baseQty: number): Promise<string | null>;

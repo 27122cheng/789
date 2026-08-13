@@ -2797,3 +2797,53 @@ describe("a signal a risk rule blocked", () => {
     expect(rec?.message).toMatch(/已經有持倉／掛單/);
   });
 });
+
+describe("51008 carries its own diagnosis", () => {
+  beforeEach(() => savePositions({}));
+
+  it("names available balance, notional and the venue's REAL leverage", async () => {
+    // the venue's per-contract leverage setting is what margin is charged
+    // against; when it silently sits at 3x, "insufficient margin" with money in
+    // the account is unexplainable without these numbers
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      let data: any[] = [];
+      if (url.includes("/public/instruments")) {
+        data = [{ instId: "ONDO-USDT-SWAP", ctVal: "10", lotSz: "1", minSz: "1", tickSz: "0.0001", lever: "50" }];
+      } else if (url.includes("/market/ticker")) data = [{ last: "0.3381" }];
+      else if (url.includes("/account/leverage-info")) data = [{ lever: "3" }];
+      else if (url.includes("/account/balance")) {
+        data = [{ details: [{ ccy: "USDT", availBal: "108.26" }] }];
+      } else if (url.includes("/account/set-leverage")) data = [{ lever: "50" }];
+      else if (url.includes("/account/positions")) data = [];
+      else if (url.includes("algo") || url.includes("orders-pending")) data = [];
+      else if (url.includes("/trade/order")) {
+        return {
+          ok: true, status: 200,
+          json: async () => ({ code: "1", msg: "", data: [{ sCode: "51008", sMsg: "Order failed. Insufficient USDT margin in account" }] }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+    const cfg = settings();
+    cfg.exchange = "okx";
+    cfg.okx = {
+      apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false,
+    };
+    cfg.trading.liveTrading = true;
+    cfg.trading.risk.cooldownSeconds = 0;
+    cfg.trading.orders.entryType = "market";
+    cfg.trading.sizing = { mode: "fixed_usdt", fixedUsdt: 10, percentBalance: 5, basis: "margin" };
+    cfg.trading.leverage = { default: 10, max: 50, whenUnspecified: "max" };
+
+    await handleIncomingMessage(
+      "ONDOUSDT SHORT Entry: 0.3381 SL: 0.340354 TP1: 0.334719", meta(), cfg
+    );
+    const rec = (await getOrders()).find((o) => o.symbol === "ONDOUSDT");
+    expect(rec?.success).toBe(false);
+    expect(rec?.message).toMatch(/可用 108\.26 USDT/);
+    expect(rec?.message).toMatch(/實際槓桿 3x/);
+    expect(rec?.message).toMatch(/需保證金約 16[0-9]\./); // ~500/3
+    expect(rec?.message).toMatch(/要求 50x/);
+  });
+});
