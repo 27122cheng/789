@@ -15,6 +15,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
 import { handleIncomingMessage } from "@/lib/executor";
 import { appendWebhookEvent, getSettings } from "@/lib/store";
+import { chatAllowed } from "@/lib/telegram";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -26,6 +27,8 @@ export async function POST(req: NextRequest) {
   let body: {
     text?: string;
     chatId?: string | number;
+    chatTitle?: string | null;
+    chatUsername?: string | null;
     messageId?: number;
     timestamp?: number; // unix ms
   };
@@ -42,13 +45,14 @@ export async function POST(req: NextRequest) {
   // Without this the listener - the path signals ACTUALLY arrive by - left no
   // trace at all, so "nothing is trading" could not be told apart from
   // "nothing is arriving", and the diagnostics page showed only bot traffic.
+  const chatTitle = body.chatTitle ?? null;
   const ev = {
     at: Date.now(),
     updateType: "listener",
     chatId,
-    chatTitle: null,
+    chatTitle,
     chatType: "listener" as const,
-    chatUsername: null,
+    chatUsername: body.chatUsername ?? null,
     fromBot: false,
     outcome: "accepted" as const,
     detail: "由監聽器（你的 Telegram 帳號）轉送",
@@ -61,6 +65,26 @@ export async function POST(req: NextRequest) {
   }
 
   const settings = await getSettings();
+
+  // The listener is signed in as the USER, so it can see every group they
+  // belong to - not just the one carrying signals. Without this check anything
+  // signal-shaped in ANY chat was traded. The bot webhook has always filtered
+  // here; this path simply never did.
+  if (
+    !chatAllowed(
+      { id: chatId, username: body.chatUsername, title: chatTitle },
+      settings.telegram.allowedChats
+    )
+  ) {
+    await appendWebhookEvent({
+      ...ev,
+      outcome: "chat_not_allowed",
+      detail:
+        `群組 ${chatId}${chatTitle ? `（${chatTitle}）` : ""} 不在「監聽群組」清單中，已忽略。` +
+        `要交易這個群組的訊號，請到設定把它加入清單`,
+    });
+    return NextResponse.json({ ok: true, skipped: "chat_not_allowed" });
+  }
   try {
     await handleIncomingMessage(
       text,

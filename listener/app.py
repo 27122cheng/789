@@ -256,13 +256,18 @@ async def handle_code(request):
     raise web.HTTPFound("/")
 
 
-async def forward_message(text: str, chat_id, message_id, ts_ms):
+async def forward_message(text: str, chat_id, message_id, ts_ms,
+                          chat_title=None, chat_username=None):
     if not INGEST_URL:
         state["error"] = "尚未設定 INGEST_URL 環境變數"
         return
+    # The title/username ride along so the website can filter by whichever form
+    # the user typed into 監聽群組 - an id, an @name, or the group's name.
     payload = {
         "text": text,
         "chatId": str(chat_id),
+        "chatTitle": chat_title,
+        "chatUsername": chat_username,
         "messageId": int(message_id),
         "timestamp": int(ts_ms),
     }
@@ -306,7 +311,11 @@ async def start_watching(client: TelegramClient):
         state["forwarded"] += 1
         state["last"] = text
         ts = int(event.message.date.timestamp() * 1000)
-        await forward_message(text, event.chat_id, event.message.id, ts)
+        chat = getattr(event, "chat", None)
+        await forward_message(
+            text, event.chat_id, event.message.id, ts,
+            getattr(chat, "title", None), getattr(chat, "username", None),
+        )
 
     # ensure the client keeps running in the background
     asyncio.create_task(client.run_until_disconnected())

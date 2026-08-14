@@ -10,7 +10,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { handleIncomingMessage } from "@/lib/executor";
 import { appendWebhookEvent, getSettings } from "@/lib/store";
-import { deriveWebhookSecret } from "@/lib/telegram";
+import { chatAllowed, deriveWebhookSecret } from "@/lib/telegram";
 import { WebhookEvent } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -35,20 +35,6 @@ interface TgMessage {
   chat: TgChat;
   from?: TgUser;
   sender_chat?: TgChat;
-}
-
-function chatAllowed(chat: TgChat, allowed: string[]): boolean {
-  // Empty whitelist = accept every chat the bot is in. The bot only receives
-  // updates from chats it has been added to, so this is a safe, friendly
-  // default that removes the "my chat id doesn't match" failure mode.
-  if (!allowed.length) return true;
-  const id = String(chat.id);
-  const username = (chat.username ?? "").toLowerCase();
-  const title = (chat.title ?? "").toLowerCase();
-  return allowed.some((entry) => {
-    const e = entry.trim().replace(/^@/, "").toLowerCase();
-    return e && (e === id || e === username || e === title);
-  });
 }
 
 export async function POST(req: NextRequest) {

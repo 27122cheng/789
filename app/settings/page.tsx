@@ -256,9 +256,18 @@ export default function SettingsPage() {
         <label>Bot Token</label>
         <input type="text" value={botToken} onChange={(e) => setBotToken(e.target.value)}
                placeholder="123456:ABC-DEF..." />
-        <label>監聽的群組／頻道（username 或數字 chat id，逗號分隔）</label>
+        <label>監聽的群組／頻道（群組名稱、username 或數字 chat id，逗號分隔）</label>
         <input type="text" value={allowedChats} onChange={(e) => setAllowedChats(e.target.value)}
-               placeholder="mysignalgroup, -1001234567890" />
+               placeholder="賺錢錢, mysignalgroup, -1001234567890" />
+        <p className="hint">
+          ⚠️ <b>留空 = 接受所有群組</b>。監聽器是用<b>你的帳號</b>登入的，
+          看得到你所有的群組，所以留空代表<b>任何群組裡長得像訊號的訊息都會下單</b>。
+          請至少填一個。群組名稱、@username、數字 id 三種寫法都可以。
+          被擋掉的訊息會記在「其他」分頁，寫明是哪個群組，方便你補進清單。
+          <br />
+          注意：群組升級成超級群組時 chat id 會改變（-123… 變成 -100123…），
+          用<b>群組名稱</b>比較不會因此失效。
+        </p>
         <div className="checkbox">
           <input type="checkbox" id="edits" checked={reactToEdits}
                  onChange={(e) => setReactToEdits(e.target.checked)} />
