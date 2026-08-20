@@ -2395,22 +2395,84 @@ export async function monitorTick(settings: Settings): Promise<string[]> {
       // remainder is still open - a scale-out whose slices did not add up, or a
       // record deleted by hand. They are unmanaged, and worse, the duplicate
       // guard refuses to open that symbol again while they exist, so the coin
-      // goes quiet with no visible reason. Record them for the dashboard.
+      // goes quiet with no visible reason.
+      //
+      // ADOPT them, right here, from data already in hand: side/size/entry from
+      // the position, stop and targets from the protective orders resting
+      // against it. Nothing is ordered or cancelled - the position keeps exactly
+      // the protection it has; this only gives the monitor a record to manage,
+      // the same thing the dashboard's 接管 button does by hand. Judged against
+      // trackedAtStart so a position closed earlier THIS tick (still present in
+      // the pre-tick exchange snapshot) is not resurrected.
+      const unclaimed = held.filter(
+        (h) =>
+          h.qty > 0 &&
+          !trackedSymbols.has(h.symbol) &&
+          !trackedAtStart.has(h.symbol)
+      );
+      const unadoptable: typeof unclaimed = [];
+      for (const u of unclaimed) {
+        const sym = u.symbol.toUpperCase().replace(/[^A-Z0-9]/g, "")
+          .replace(/(SWAP|PERP)$/, "");
+        // the round trip proves the venue symbol is one this client understands;
+        // anything else stays on the warning panel for a human
+        if (!sym || positions[sym] || client.perpSymbol(sym) !== u.symbol) {
+          unadoptable.push(u);
+          continue;
+        }
+        const symStops = stops.filter((o) => o.symbol === u.symbol);
+        const stopLoss = symStops.find((o) => o.kind === "sl")?.trigger ?? null;
+        const takeProfits = symStops
+          .filter((o) => o.kind === "tp" && o.trigger != null)
+          .map((o) => o.trigger as number)
+          .sort((a, b) => (u.side === "long" ? a - b : b - a));
+        positions[sym] = {
+          symbol: sym,
+          side: u.side,
+          entryPrice: u.entryPrice,
+          qty: u.qty,
+          originalQty: u.qty,
+          sizeUsdt: u.qty * u.entryPrice,
+          leverage: settings.trading.leverage.default,
+          stopLoss,
+          takeProfits,
+          tpCountOriginal: takeProfits.length,
+          tpHit: [],
+          pendingAdds: [],
+          entryOrderType: settings.trading.orders.entryType,
+          beMoved: false,
+          initialRisk: stopLoss != null ? Math.abs(u.entryPrice - stopLoss) : null,
+          // the trade's history is unknown - which R levels already paid cannot
+          // be recovered - so no scale-out plan is invented for it
+          rTargets: [],
+          realizedPnl: 0,
+          closedQty: 0,
+          openedAt: Date.now(),
+          addCount: 0,
+          dryRun: false,
+          orderIds: [],
+          pendingEntry: null,
+        } as Position;
+        changed = true;
+        actions.push(
+          `${sym}: 發現交易所有未追蹤持倉，已自動接管（${u.qty} @ ${u.entryPrice}）`
+        );
+        await record("open",
+          { symbol: sym, side: u.side, sizeUsdt: u.qty * u.entryPrice, qty: u.qty, price: u.entryPrice, leverage: settings.trading.leverage.default },
+          true, true,
+          `自動接管交易所既有持倉（${u.qty} @ ${u.entryPrice}），` +
+            `沿用交易所上的保護單：SL ${stopLoss ?? "無"} / TP ${takeProfits.join("/") || "無"}` +
+            (stopLoss == null ? "；⚠️ 交易所上找不到止損，請自行確認" : ""));
+      }
+      // only what could NOT be adopted is left for the dashboard warning
       await setUntrackedSnapshot({
         at: Date.now(),
-        positions: held
-          .filter(
-            (h) =>
-              h.qty > 0 &&
-              !trackedSymbols.has(h.symbol) &&
-              !trackedAtStart.has(h.symbol)
-          )
-          .map((h) => ({
-            symbol: h.symbol,
-            side: h.side,
-            qty: h.qty,
-            entryPrice: h.entryPrice,
-          })),
+        positions: unadoptable.map((h) => ({
+          symbol: h.symbol,
+          side: h.side,
+          qty: h.qty,
+          entryPrice: h.entryPrice,
+        })),
       });
 
       const orphans = stops.filter(

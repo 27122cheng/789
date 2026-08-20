@@ -224,7 +224,7 @@ export default function Dashboard() {
 
       {(state.untracked?.positions ?? []).length > 0 && (
         <div className="banner live" style={{ marginBottom: 14 }}>
-          ⚠️ 交易所有 {state.untracked.positions.length} 筆持倉，本系統沒有追蹤
+          ⚠️ 交易所有 {state.untracked.positions.length} 筆持倉無法自動接管
           （{fmtTime(state.untracked.at)} 檢查）
           <div style={{ overflowX: "auto", marginTop: 8 }}>
             <table>
@@ -252,11 +252,12 @@ export default function Dashboard() {
               </tbody>
             </table>
           </div>
-          這些倉位<b>不會被本系統管理</b>（不會移動止損、分批止盈、也不會平倉），
-          而且它們會<b>擋掉同幣種的新訊號</b> —— 開倉前的重複檢查看到交易所已有持倉就會略過。
+          未追蹤的持倉通常會在下一分鐘的監控<b>自動接管</b>；還留在這裡的是自動接管失敗的
+          （多半是系統認不得的合約代號）。這些倉位<b>不會被本系統管理</b>，
+          而且會<b>擋掉同幣種的新訊號</b>。
           <br />
-          按「<b>接管</b>」會沿用交易所上現有的止損／止盈把它交回本系統管理（不會下新單、不會平倉）；
-          如果只是分批止盈後剩下的零頭，直接到交易所平掉即可。
+          按「<b>接管</b>」再試一次（沿用交易所上現有的止損／止盈，不會下新單、不會平倉）；
+          或直接到交易所平掉。
         </div>
       )}
 

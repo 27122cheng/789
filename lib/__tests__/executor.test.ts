@@ -2618,13 +2618,20 @@ describe("positions the exchange holds but the tracker does not", () => {
 
     await monitorTick(cfg);
 
-    const snap = await getUntrackedSnapshot();
-    expect(snap).not.toBeNull();
-    const syms = snap!.positions.map((p) => p.symbol).sort();
-    expect(syms).toEqual(["ALGO-USDT-SWAP", "MASK-USDT-SWAP"]);
-    expect(snap!.positions.find((p) => p.symbol === "MASK-USDT-SWAP")).toMatchObject({
-      side: "short", qty: 159,
-    });
+    // both are ADOPTED on the spot - tracked from data already in hand, so the
+    // symbol unblocks and the monitor manages them from the next tick
+    const after = await getPositions();
+    expect(after["MASKUSDT"]).toMatchObject({ side: "short", qty: 159, dryRun: false });
+    expect(after["ALGOUSDT"]).toMatchObject({ side: "short", qty: 10 });
+    // FIL was tracked and hit its target THIS tick (stub price 0.34 < TP
+    // 0.6733 for a short). It is still in the pre-tick exchange snapshot, so
+    // adopting it back would resurrect a just-closed position - the
+    // trackedAtStart guard is what prevents exactly that.
+    expect(after["FILUSDT"]).toBeUndefined();
+    // nothing left for the warning panel
+    expect((await getUntrackedSnapshot())?.positions).toEqual([]);
+    const rec = (await getOrders()).find((o) => o.symbol === "MASKUSDT");
+    expect(rec?.message).toMatch(/自動接管/);
   });
 });
 
