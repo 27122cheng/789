@@ -53,7 +53,15 @@ export default function Dashboard() {
       setError("");
     } else {
       setAuthed(false);
-      setError(body?.needsSetup ? "" : body?.error ?? `HTTP ${status}`);
+      // A store that cannot be read is not a wrong password: say so, or the
+      // user goes off resetting a password that was never the problem.
+      setError(
+        body?.storeDown
+          ? `⚠️ ${body.error}`
+          : body?.needsSetup
+            ? ""
+            : body?.error ?? `HTTP ${status}`
+      );
     }
   }, []);
 

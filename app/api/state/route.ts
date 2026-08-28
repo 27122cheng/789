@@ -27,7 +27,22 @@ function normalizeVenueSymbol(s: string): string {
 export async function GET(req: NextRequest) {
   const denied = await requireAdmin(req);
   if (denied) return denied;
+  try {
+    return await buildState();
+  } catch (err) {
+    // An opaque 500 here reads as "the app is broken" when the usual cause is
+    // simply that the KV store cannot be reached.
+    return NextResponse.json(
+      {
+        error: `讀取資料失敗：${(err as Error).message}（多半是 Upstash KV 連線問題）`,
+        storeDown: true,
+      },
+      { status: 503 }
+    );
+  }
+}
 
+async function buildState() {
   const [settings, positions, signals, orders, monitorRun, stopSnapshot, untracked] =
     await Promise.all([
     getSettings(),
@@ -44,7 +59,7 @@ export async function GET(req: NextRequest) {
       ? !!settings.okx.apiKey && !!settings.okx.apiSecret && !!settings.okx.passphrase
       : !!settings.pionex.apiKey && !!settings.pionex.apiSecret;
 
-  const stops = stopSnapshot
+  const stops = stopSnapshot?.bySymbol
     ? {
         at: stopSnapshot.at,
         bySymbol: Object.fromEntries(
@@ -64,7 +79,7 @@ export async function GET(req: NextRequest) {
     exchangeStops: settings.trading.orders.exchangeStops !== false,
     monitorRun,
     stopSnapshot: stops,
-    untracked: untracked
+    untracked: untracked?.positions
       ? {
           at: untracked.at,
           positions: untracked.positions.map((p) => ({
