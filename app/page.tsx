@@ -149,7 +149,8 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (!authed) return;
-    const t = setInterval(load, 15000);
+    // 30s: each poll is a KV command, and the free tier is priced per command
+    const t = setInterval(load, 30000);
     return () => clearInterval(t);
   }, [authed, load]);
 

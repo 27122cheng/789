@@ -38,12 +38,18 @@ export async function adminAuthMode(): Promise<AuthMode> {
  *  is not a 401 - the credentials were never checked at all, and calling it
  *  "wrong password" sends the user off resetting a password that is fine. */
 function storeDown(err: unknown): NextResponse {
+  const msg = (err as Error).message;
+  const quota = /max requests limit/i.test(msg);
   return NextResponse.json(
     {
-      error:
-        `資料庫（Upstash KV）連線失敗，無法驗證密碼：${(err as Error).message}。` +
-        `若資料庫已停用或額度用盡，可先在 Vercel 設定 ADMIN_PASSWORD 環境變數登入 —— ` +
-        `環境變數不需要讀取資料庫。`,
+      error: quota
+        ? `Upstash 免費額度已用盡（每月 50 萬次指令），資料庫拒絕所有讀寫：${msg}。` +
+          `最快的解法：到 upstash.com 建一個新的免費 Redis 資料庫，把它的 REST URL 和 TOKEN ` +
+          `填進 Vercel 環境變數 UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN 後重新部署；` +
+          `或在 Upstash 對現有資料庫啟用 pay-as-you-go。額度也會在帳單週期重置。`
+        : `資料庫（Upstash KV）連線失敗，無法驗證密碼：${msg}。` +
+          `若資料庫已停用或額度用盡，可先在 Vercel 設定 ADMIN_PASSWORD 環境變數登入 —— ` +
+          `環境變數不需要讀取資料庫。`,
       storeDown: true,
     },
     { status: 503 }

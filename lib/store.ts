@@ -86,13 +86,42 @@ async function kvDel(key: string): Promise<void> {
   memory.delete(key);
 }
 
+/** Several keys in ONE Redis command. Upstash's free tier is priced per
+ *  command, and reading seven keys as seven GETs is what burned through the
+ *  monthly quota - an MGET costs the same as one. */
+async function kvGetMany(keys: string[]): Promise<(unknown | null)[]> {
+  const redis = redisFromEnv();
+  if (redis) {
+    const rows = await redis.mget<(unknown | null)[]>(...keys);
+    return keys.map((_, i) => rows[i] ?? null);
+  }
+  return keys.map((k) =>
+    memory.has(k) ? structuredClone(memory.get(k)) : null
+  );
+}
+
+/** Per-instance read cache for keys that are hot but change rarely (the admin
+ *  hash is read on EVERY authenticated request). Serverless instances live for
+ *  many requests, so this removes most of that traffic; staleness is bounded by
+ *  the TTL and only ever affects reads on OTHER instances than the writer. */
+const localCache = new Map<string, { v: unknown; exp: number }>();
+
+function cacheRead<T>(key: string): T | undefined {
+  const hit = localCache.get(key);
+  if (!hit || Date.now() > hit.exp) return undefined;
+  return structuredClone(hit.v) as T;
+}
+
+function cacheWrite(key: string, v: unknown, ttlMs: number): void {
+  localCache.set(key, { v: structuredClone(v), exp: Date.now() + ttlMs });
+}
+
 export function hasDurableStore(): boolean {
   return redisFromEnv() !== null;
 }
 
 // ---------------------------------------------------------------- settings
-export async function getSettings(): Promise<Settings> {
-  const stored = await kvGet<Partial<Settings>>(K_SETTINGS);
+function mergeStoredSettings(stored: Partial<Settings> | null): Settings {
   if (!stored) return structuredClone(DEFAULT_SETTINGS);
   // deep-merge over defaults so newly added fields get sane values
   const merged = deepMerge(structuredClone(DEFAULT_SETTINGS), stored) as Settings;
@@ -104,8 +133,20 @@ export async function getSettings(): Promise<Settings> {
   return merged;
 }
 
+export async function getSettings(): Promise<Settings> {
+  const cached = cacheRead<Settings>(K_SETTINGS);
+  if (cached !== undefined) return cached;
+  const stored = await kvGet<Partial<Settings>>(K_SETTINGS);
+  const merged = mergeStoredSettings(stored);
+  // settings are read by every webhook, ingest and monitor call but change only
+  // when a human presses save; 15s of cross-instance staleness is acceptable
+  cacheWrite(K_SETTINGS, merged, 15_000);
+  return merged;
+}
+
 export async function saveSettings(settings: Settings): Promise<void> {
   await kvSet(K_SETTINGS, settings);
+  cacheWrite(K_SETTINGS, mergeStoredSettings(settings), 15_000);
 }
 
 function deepMerge(base: any, patch: any): any {
@@ -213,8 +254,18 @@ export interface StopSnapshot {
   bySymbol: Record<string, { kind: "tp" | "sl"; trigger: number | null }[]>;
 }
 
+// Written every monitor tick but its content rarely changes; identical writes
+// are skipped (with a 5-min refresh so the timestamp stays meaningful) - on the
+// free KV tier every command counts.
+let lastStopSnapBody = "";
+let lastStopSnapAt = 0;
+
 export async function setStopSnapshot(snap: StopSnapshot): Promise<void> {
+  const body = JSON.stringify(snap.bySymbol);
+  if (body === lastStopSnapBody && Date.now() - lastStopSnapAt < 5 * 60_000) return;
   await kvSet(K_STOPSNAP, snap);
+  lastStopSnapBody = body;
+  lastStopSnapAt = Date.now();
 }
 
 export async function getStopSnapshot(): Promise<StopSnapshot | null> {
@@ -237,12 +288,53 @@ export interface UntrackedSnapshot {
   }[];
 }
 
+let lastUntrackedBody = "";
+let lastUntrackedAt = 0;
+
 export async function setUntrackedSnapshot(snap: UntrackedSnapshot): Promise<void> {
+  const body = JSON.stringify(snap.positions);
+  if (body === lastUntrackedBody && Date.now() - lastUntrackedAt < 5 * 60_000) return;
   await kvSet(K_UNTRACKED, snap);
+  lastUntrackedBody = body;
+  lastUntrackedAt = Date.now();
 }
 
 export async function getUntrackedSnapshot(): Promise<UntrackedSnapshot | null> {
   return await kvGet<UntrackedSnapshot>(K_UNTRACKED);
+}
+
+// ------------------------------------------------ dashboard state bundle
+/** Everything /api/state needs, fetched as ONE Redis command instead of seven.
+ *  The dashboard polls this endpoint continuously, so its cost per poll is what
+ *  decides whether the free KV tier lasts the month. */
+export async function getStateBundle(): Promise<{
+  settings: Settings;
+  positions: Record<string, Position>;
+  signals: SignalRecord[];
+  orders: OrderRecord[];
+  monitorRun: MonitorRun | null;
+  stopSnapshot: StopSnapshot | null;
+  untracked: UntrackedSnapshot | null;
+}> {
+  const [rawSettings, positions, signals, orders, monitorRun, stopSnapshot, untracked] =
+    await kvGetMany([
+      K_SETTINGS,
+      K_POSITIONS,
+      K_SIGNALS,
+      K_ORDERS,
+      K_MONITOR,
+      K_STOPSNAP,
+      K_UNTRACKED,
+    ]);
+  return {
+    settings: mergeStoredSettings(rawSettings as Partial<Settings> | null),
+    positions: (positions as Record<string, Position> | null) ?? {},
+    signals: (signals as SignalRecord[] | null) ?? [],
+    orders: (orders as OrderRecord[] | null) ?? [],
+    monitorRun: monitorRun as MonitorRun | null,
+    stopSnapshot: stopSnapshot as StopSnapshot | null,
+    untracked: untracked as UntrackedSnapshot | null,
+  };
 }
 
 // ------------------------------------ listener login (Telethon) persistence
@@ -298,12 +390,18 @@ export async function setCooldown(symbol: string, at: number): Promise<void> {
  * and is then recorded, so later requests (and later deploys) skip it.
  */
 const K_MIGRATIONS = KEY_PREFIX + "migrations";
+// ids this instance has already checked - keeps the per-request cost at zero
+// after the first read, whatever the KV list says
+const migrationsChecked = new Set<string>();
 
 async function migrationOnce(id: string, apply: () => Promise<void>): Promise<void> {
+  if (migrationsChecked.has(id)) return;
   const done = (await kvGet<string[]>(K_MIGRATIONS)) ?? [];
-  if (done.includes(id)) return;
-  await apply();
-  await kvSet(K_MIGRATIONS, [...done, id]);
+  if (!done.includes(id)) {
+    await apply();
+    await kvSet(K_MIGRATIONS, [...done, id]);
+  }
+  migrationsChecked.add(id);
 }
 
 export async function getAdminPasswordHash(): Promise<string | null> {
@@ -313,24 +411,38 @@ export async function getAdminPasswordHash(): Promise<string | null> {
   // recorded on first run, so this never fires again.
   await migrationOnce("2026-08-drop-admin-hash", async () => {
     await kvDel(K_ADMIN_HASH);
+    localCache.delete(K_ADMIN_HASH);
   });
-  return (await kvGet<string>(K_ADMIN_HASH)) || null;
+  const cached = cacheRead<string | null>(K_ADMIN_HASH);
+  if (cached !== undefined) return cached;
+  const v = (await kvGet<string>(K_ADMIN_HASH)) || null;
+  // read on every authenticated request, changed almost never
+  cacheWrite(K_ADMIN_HASH, v, 30_000);
+  return v;
 }
 
 export async function setAdminPasswordHash(hash: string): Promise<void> {
   await kvSet(K_ADMIN_HASH, hash);
+  cacheWrite(K_ADMIN_HASH, hash, 30_000);
 }
 
 /** Auto-generated secret for the monitor endpoint; created on first use so
  *  the user never has to configure a CRON_SECRET env var by hand. */
+let cronSecretCache: string | null = null;
+
 export async function getOrCreateCronSecret(): Promise<string> {
+  if (cronSecretCache) return cronSecretCache;
   const existing = await kvGet<string>(K_CRON_SECRET);
-  if (existing) return existing;
+  if (existing) {
+    cronSecretCache = existing;
+    return existing;
+  }
   const secret = Array.from(
     { length: 32 },
     () => "abcdefghijklmnopqrstuvwxyz0123456789"[Math.floor(Math.random() * 36)]
   ).join("");
   await kvSet(K_CRON_SECRET, secret);
+  cronSecretCache = secret;
   return secret;
 }
 

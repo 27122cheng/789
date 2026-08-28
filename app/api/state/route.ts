@@ -1,15 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { adminAuthMode, requireAdmin } from "@/lib/auth";
-import {
-  getMonitorRun,
-  getStopSnapshot,
-  getUntrackedSnapshot,
-  getOrders,
-  getPositions,
-  getSettings,
-  getSignals,
-  hasDurableStore,
-} from "@/lib/store";
+import { getStateBundle, hasDurableStore } from "@/lib/store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -43,16 +34,10 @@ export async function GET(req: NextRequest) {
 }
 
 async function buildState() {
-  const [settings, positions, signals, orders, monitorRun, stopSnapshot, untracked] =
-    await Promise.all([
-    getSettings(),
-    getPositions(),
-    getSignals(),
-    getOrders(),
-    getMonitorRun(),
-    getStopSnapshot(),
-    getUntrackedSnapshot(),
-  ]);
+  // one Redis command for the whole page - this endpoint is polled, so its
+  // per-call cost decides whether the free KV tier survives the month
+  const { settings, positions, signals, orders, monitorRun, stopSnapshot, untracked } =
+    await getStateBundle();
 
   const exchangeKeys =
     settings.exchange === "okx"
