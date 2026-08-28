@@ -77,6 +77,15 @@ async function kvSet(key: string, value: unknown): Promise<void> {
   memory.set(key, structuredClone(value));
 }
 
+async function kvDel(key: string): Promise<void> {
+  const redis = redisFromEnv();
+  if (redis) {
+    await redis.del(key);
+    return;
+  }
+  memory.delete(key);
+}
+
 export function hasDurableStore(): boolean {
   return redisFromEnv() !== null;
 }
@@ -281,8 +290,31 @@ export async function setCooldown(symbol: string, at: number): Promise<void> {
 }
 
 // ---------------------------------------------------- auth & cron secrets
+/**
+ * One-time deploy-side fixes, applied lazily on the first request that needs
+ * the data they touch. This is the only lever available when the user cannot
+ * log in at all: there is no session to act from, but a git push still
+ * deploys - so recovery rides on the deploy itself. Each id runs exactly once
+ * and is then recorded, so later requests (and later deploys) skip it.
+ */
+const K_MIGRATIONS = KEY_PREFIX + "migrations";
+
+async function migrationOnce(id: string, apply: () => Promise<void>): Promise<void> {
+  const done = (await kvGet<string[]>(K_MIGRATIONS)) ?? [];
+  if (done.includes(id)) return;
+  await apply();
+  await kvSet(K_MIGRATIONS, [...done, id]);
+}
+
 export async function getAdminPasswordHash(): Promise<string | null> {
-  return await kvGet<string>(K_ADMIN_HASH);
+  // 2026-08: the custom admin password was forgotten. Drop the stored hash so
+  // auth falls back to the built-in default and the login screen signs in by
+  // itself. A password set AFTER this deploy sticks: the migration id is
+  // recorded on first run, so this never fires again.
+  await migrationOnce("2026-08-drop-admin-hash", async () => {
+    await kvDel(K_ADMIN_HASH);
+  });
+  return (await kvGet<string>(K_ADMIN_HASH)) || null;
 }
 
 export async function setAdminPasswordHash(hash: string): Promise<void> {

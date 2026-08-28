@@ -65,3 +65,20 @@ describe("requireAdmin", () => {
     expect(hashPassword("abc")).not.toBe(hashPassword("abd"));
   });
 });
+
+describe("forgotten-password recovery migration", () => {
+  it("drops a pre-existing hash once, then lets a new password stick", async () => {
+    // the real store this time - the in-memory backend stands in for KV
+    const store = await vi.importActual<typeof import("../store")>("../store");
+
+    // a forgotten custom password is stored
+    await store.setAdminPasswordHash("some-forgotten-hash");
+    // deploy lands; the first read applies the migration and the hash is gone
+    expect(await store.getAdminPasswordHash()).toBeNull();
+
+    // setting a NEW password afterwards must survive - the migration is
+    // recorded and never fires again
+    await store.setAdminPasswordHash("new-hash");
+    expect(await store.getAdminPasswordHash()).toBe("new-hash");
+  });
+});
