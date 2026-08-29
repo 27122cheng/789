@@ -207,6 +207,21 @@ export default function Dashboard() {
       </div>
 
       {(() => {
+        const sh = state.storeHealth;
+        const standby = (sh?.backends ?? []).find((b: any) => b.name === "standby");
+        const primary = (sh?.backends ?? []).find((b: any) => b.name === "primary");
+        if (primary?.benched && standby && !standby.benched) {
+          return (
+            <p className="hint">
+              🟡 主資料庫暫時無法使用（{sh.lastError ?? "原因不明"}），已自動切換到備援資料庫，
+              交易與監控照常運作。
+            </p>
+          );
+        }
+        return null;
+      })()}
+
+      {(() => {
         const run = state.monitorRun;
         const ageMs = run ? Date.now() - run.at : null;
         // the cron is meant to fire every minute; treat >5 min as stopped

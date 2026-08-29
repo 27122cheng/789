@@ -159,3 +159,19 @@ tests/                     # Python 版 pytest
 config/settings.example.yaml
 vercel.json                # Vercel Cron 宣告
 ```
+
+
+## 備援資料庫（強烈建議）
+
+Upstash 免費方案每月 50 萬次指令，用完當月**整個系統停擺**（登入、設定、監控、交易全部）。
+設一個備援資料庫，主庫額度用盡時會自動切換過去，交易不中斷：
+
+1. 到 [upstash.com](https://upstash.com) 再建立一個免費 Redis 資料庫
+2. 複製它的 **REST URL** 與 **REST TOKEN**
+3. 在 Vercel → Settings → Environment Variables 新增：
+   - `STANDBY_REDIS_REST_URL`
+   - `STANDBY_REDIS_REST_TOKEN`
+4. Redeploy
+
+平常所有寫入會同時鏡射到兩邊（備庫隨時是最新的），讀取只打主庫。
+主庫一失效，讀取自動改走備庫，儀表板會顯示「已自動切換到備援資料庫」。

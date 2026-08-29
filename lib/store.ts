@@ -44,8 +44,31 @@ const FALLBACK_REDIS_URL = "https://probable-platypus-39069.upstash.io";
 const FALLBACK_REDIS_TOKEN =
   "AZidAAIgcDE3MzQ4Mjg0OTNhYWI0MzI1YjJkYjFmNzVlMzI1ODI3Yg";
 
-function redisFromEnv(): Redis | null {
-  if (process.env.TPX_DISABLE_KV === "1") return null; // tests / local dev
+/**
+ * Storage backends, in read-preference order.
+ *
+ * The primary is the env-configured (or built-in fallback) database. A STANDBY
+ * can be added by creating a second free Upstash database and setting
+ * STANDBY_REDIS_REST_URL / STANDBY_REDIS_REST_TOKEN in Vercel - the reason it
+ * exists is the month the primary's free quota ran out and everything (login,
+ * settings, the monitor, trading) died with it.
+ *
+ * Writes go to EVERY backend, so the standby always carries current data and a
+ * failover loses nothing. Reads use the first backend that answers; one that
+ * throws is benched for a few minutes so a dead database costs one failed call,
+ * not one per request.
+ */
+interface Backend {
+  name: "primary" | "standby";
+  redis: Redis;
+}
+
+let backendsCache: Backend[] | null = null;
+
+function backends(): Backend[] {
+  if (process.env.TPX_DISABLE_KV === "1") return []; // tests / local dev
+  if (backendsCache) return backendsCache;
+  const out: Backend[] = [];
   const url =
     process.env.KV_REST_API_URL ||
     process.env.UPSTASH_REDIS_REST_URL ||
@@ -54,50 +77,121 @@ function redisFromEnv(): Redis | null {
     process.env.KV_REST_API_TOKEN ||
     process.env.UPSTASH_REDIS_REST_TOKEN ||
     FALLBACK_REDIS_TOKEN;
-  if (url && token) return new Redis({ url, token });
-  return null;
+  if (url && token) out.push({ name: "primary", redis: new Redis({ url, token }) });
+  const sUrl = process.env.STANDBY_REDIS_REST_URL;
+  const sToken = process.env.STANDBY_REDIS_REST_TOKEN;
+  if (sUrl && sToken) out.push({ name: "standby", redis: new Redis({ url: sUrl, token: sToken }) });
+  backendsCache = out;
+  return out;
+}
+
+// a backend that failed is skipped for this long before being retried
+const BENCH_MS = 5 * 60_000;
+const benchedUntil = new Map<string, number>();
+
+function usable(): Backend[] {
+  return backends().filter((b) => (benchedUntil.get(b.name) ?? 0) < Date.now());
+}
+
+function bench(b: Backend, err: unknown): void {
+  benchedUntil.set(b.name, Date.now() + BENCH_MS);
+  lastStoreError = `${b.name}: ${(err as Error).message}`;
+}
+
+/** For diagnostics: which backends exist, which are benched, and the last
+ *  error - so "why is the site on the standby database?" has an answer. */
+export let lastStoreError: string | null = null;
+
+export function storeHealth(): {
+  backends: { name: string; benched: boolean }[];
+  lastError: string | null;
+} {
+  return {
+    backends: backends().map((b) => ({
+      name: b.name,
+      benched: (benchedUntil.get(b.name) ?? 0) >= Date.now(),
+    })),
+    lastError: lastStoreError,
+  };
 }
 
 const memory = new Map<string, unknown>();
 
-async function kvGet<T>(key: string): Promise<T | null> {
-  const redis = redisFromEnv();
-  if (redis) return (await redis.get<T>(key)) ?? null;
-  const value = memory.get(key);
-  // clone so callers get value semantics, same as the Redis JSON round-trip
-  return value === undefined ? null : structuredClone(value as T);
+/** Runs a read against the first live backend, falling through on failure.
+ *  Throws only when every backend failed. */
+async function readVia<T>(fn: (r: Redis) => Promise<T>): Promise<T> {
+  const list = usable();
+  // everything benched: retry them all rather than failing without trying
+  const candidates = list.length ? list : backends();
+  let lastErr: unknown = new Error("no storage backend configured");
+  for (const b of candidates) {
+    try {
+      const v = await fn(b.redis);
+      benchedUntil.delete(b.name);
+      return v;
+    } catch (err) {
+      bench(b, err);
+      lastErr = err;
+    }
+  }
+  throw lastErr;
 }
 
+async function kvGet<T>(key: string): Promise<T | null> {
+  if (!backends().length) {
+    const value = memory.get(key);
+    // clone so callers get value semantics, same as the Redis JSON round-trip
+    return value === undefined ? null : structuredClone(value as T);
+  }
+  return await readVia(async (r) => (await r.get<T>(key)) ?? null);
+}
+
+/** Writes to every backend in parallel, so the standby stays current. Succeeds
+ *  if ANY backend took the write; throws only when all of them refused. */
 async function kvSet(key: string, value: unknown): Promise<void> {
-  const redis = redisFromEnv();
-  if (redis) {
-    await redis.set(key, value);
+  const list = backends();
+  if (!list.length) {
+    memory.set(key, structuredClone(value));
     return;
   }
-  memory.set(key, structuredClone(value));
+  const results = await Promise.allSettled(list.map((b) => b.redis.set(key, value)));
+  let ok = false;
+  results.forEach((res, i) => {
+    if (res.status === "fulfilled") {
+      ok = true;
+      benchedUntil.delete(list[i].name);
+    } else {
+      bench(list[i], res.reason);
+    }
+  });
+  if (!ok) throw (results[0] as PromiseRejectedResult).reason;
 }
 
 async function kvDel(key: string): Promise<void> {
-  const redis = redisFromEnv();
-  if (redis) {
-    await redis.del(key);
+  const list = backends();
+  if (!list.length) {
+    memory.delete(key);
     return;
   }
-  memory.delete(key);
+  const results = await Promise.allSettled(list.map((b) => b.redis.del(key)));
+  if (!results.some((r) => r.status === "fulfilled")) {
+    throw (results[0] as PromiseRejectedResult).reason;
+  }
 }
 
 /** Several keys in ONE Redis command. Upstash's free tier is priced per
  *  command, and reading seven keys as seven GETs is what burned through the
  *  monthly quota - an MGET costs the same as one. */
 async function kvGetMany(keys: string[]): Promise<(unknown | null)[]> {
-  const redis = redisFromEnv();
-  if (redis) {
-    const rows = await redis.mget<(unknown | null)[]>(...keys);
-    return keys.map((_, i) => rows[i] ?? null);
+  if (!backends().length) {
+    return keys.map((k) =>
+      memory.has(k) ? structuredClone(memory.get(k)) : null
+    );
   }
-  return keys.map((k) =>
-    memory.has(k) ? structuredClone(memory.get(k)) : null
-  );
+  return await readVia(async (r) => {
+    const rows = await r.mget<(unknown | null)[]>(...keys);
+    return keys.map((_, i) => rows[i] ?? null);
+  });
 }
 
 /** Per-instance read cache for keys that are hot but change rarely (the admin
@@ -117,7 +211,7 @@ function cacheWrite(key: string, v: unknown, ttlMs: number): void {
 }
 
 export function hasDurableStore(): boolean {
-  return redisFromEnv() !== null;
+  return backends().length > 0;
 }
 
 // ---------------------------------------------------------------- settings

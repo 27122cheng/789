@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { adminAuthMode, requireAdmin } from "@/lib/auth";
-import { getStateBundle, hasDurableStore } from "@/lib/store";
+import { getStateBundle, hasDurableStore, storeHealth } from "@/lib/store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -74,6 +74,7 @@ async function buildState() {
         }
       : null,
     durableStore: hasDurableStore(),
+    storeHealth: storeHealth(),
     configured: {
       telegramBot: !!settings.telegram.botToken,
       allowedChats: settings.telegram.allowedChats.length,
