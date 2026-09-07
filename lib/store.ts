@@ -329,6 +329,16 @@ export interface MonitorRun {
   actionCount: number;
   actions: string[];
   error: string | null;
+  // Reported by the listener when it drives this tick, so the dashboard can
+  // tell "listener alive AND logged in AND watching N chats" apart from
+  // "listener alive but logged out" - the latter is the silent reason signals
+  // stop arriving after the login (stored in KV) is lost.
+  listener?: {
+    authorized: boolean;
+    watching: boolean;
+    chats: number;      // how many chats it is watching (0 = all)
+    forwarded: number;  // messages forwarded since the process started
+  } | null;
 }
 
 export async function setMonitorRun(run: MonitorRun): Promise<void> {

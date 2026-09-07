@@ -352,8 +352,18 @@ async def monitor_loop():
     headers = {"x-admin-password": ADMIN_PASSWORD}
     while True:
         try:
+            # report our own health on the call we already make each minute, so
+            # the website can distinguish "logged in and watching" from
+            # "process alive but logged out" - the silent cause of no signals
+            params = {
+                "listener": "1",
+                "authorized": "1" if state.get("authorized") else "0",
+                "watching": "1" if state.get("watching") else "0",
+                "chats": str(len(WATCH_CHATS)),
+                "forwarded": str(state.get("forwarded", 0)),
+            }
             async with aiohttp.ClientSession() as s:
-                async with s.get(MONITOR_URL, headers=headers, timeout=50) as r:
+                async with s.get(MONITOR_URL, headers=headers, params=params, timeout=50) as r:
                     body = await r.text()
                     state["monitor_ok"] = r.status == 200
                     state["monitor_note"] = f"HTTP {r.status} {body[:160]}"

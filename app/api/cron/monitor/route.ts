@@ -34,6 +34,19 @@ export async function GET(req: NextRequest) {
     }
   }
 
+  // The listener piggybacks its own health onto this call it already makes
+  // every minute, so the dashboard learns whether it is logged in without an
+  // extra KV write or a second endpoint.
+  const q = req.nextUrl.searchParams;
+  const listener = q.has("listener")
+    ? {
+        authorized: q.get("authorized") === "1",
+        watching: q.get("watching") === "1",
+        chats: Number(q.get("chats") ?? "0") || 0,
+        forwarded: Number(q.get("forwarded") ?? "0") || 0,
+      }
+    : null;
+
   const settings = await getSettings();
   // Record every run, success or failure: a silent dashboard otherwise looks
   // the same whether the monitor is healthy, erroring, or never being called.
@@ -44,11 +57,12 @@ export async function GET(req: NextRequest) {
       actionCount: actions.length,
       actions: actions.slice(0, 20),
       error: null,
+      listener,
     });
     return NextResponse.json({ ok: true, at: new Date().toISOString(), actions });
   } catch (e) {
     const error = (e as Error).message;
-    await setMonitorRun({ at: Date.now(), actionCount: 0, actions: [], error });
+    await setMonitorRun({ at: Date.now(), actionCount: 0, actions: [], error, listener });
     return NextResponse.json({ ok: false, at: new Date().toISOString(), error }, { status: 500 });
   }
 }

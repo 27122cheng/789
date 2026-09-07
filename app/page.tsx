@@ -226,11 +226,29 @@ export default function Dashboard() {
         const ageMs = run ? Date.now() - run.at : null;
         // the cron is meant to fire every minute; treat >5 min as stopped
         const stale = ageMs == null || ageMs > 5 * 60 * 1000;
+        const lis = run?.listener;
+        // The listener drives the monitor, so a fresh tick means it is alive.
+        // But alive-and-logged-out is exactly how signals go silent, so call
+        // that out separately rather than showing a reassuring green line.
+        if (!stale && lis && !lis.authorized) {
+          return (
+            <div className="banner live" style={{ marginBottom: 14 }}>
+              ⚠️ 監聽器在線，但<b>沒有登入 Telegram</b> —— 這就是收不到訊號的原因。
+              <br />
+              最常見於換過資料庫之後：登入資料存在資料庫裡，換庫後就沒了。
+              請到 Render 監聽器的網頁<b>重新登入一次</b>（輸入手機號 → 收驗證碼），
+              登入後這裡會變綠，訊號就會進來。
+            </div>
+          );
+        }
         if (!stale && !run.error) {
           return (
             <p className="hint">
               ✅ 監控正常運作 — 最後執行 {Math.round((ageMs ?? 0) / 1000)} 秒前
               {run.actionCount ? `（${run.actionCount} 個動作）` : ""}
+              {lis
+                ? `｜監聽器：已登入、監聽 ${lis.chats || "全部"} 個群組、已轉發 ${lis.forwarded} 則`
+                : ""}
             </p>
           );
         }
@@ -240,8 +258,9 @@ export default function Dashboard() {
             {run ? ` — 最後執行：${fmtTime(run.at)}` : ""}
             {run?.error ? `，錯誤：${run.error}` : ""}
             <br />
-            止損、止盈、到價進場、補掛保護單都靠這個每分鐘的排程。
-            請確認 cron-job.org 的排程有在跑（設定頁有網址與密鑰）。
+            止損、止盈、到價進場、補掛保護單都靠這個每分鐘的排程，而它是由 Render 監聽器
+            每分鐘呼叫的。監控停了通常代表<b>監聽器整個掛了</b>（Render 免費方案閒置會休眠、
+            或程式崩潰）—— 訊號自然也收不到。請到 Render 打開監聽器網頁確認它在線並已登入。
           </div>
         );
       })()}
