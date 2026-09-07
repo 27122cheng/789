@@ -846,7 +846,11 @@ export async function executeSignal(
     switch (signal.action) {
       case "open": {
         if (!signal.side) {
-          return; // incomplete signal (no direction) - drop silently
+          await record("open",
+            { symbol: sym, side: null, sizeUsdt: 0, qty: 0, price: signal.entryPrice, leverage: 0 },
+            live, false,
+            "訊號沒有多／空方向，無法下單。若原始訊息其實有方向，請把它貼到解析測試看哪裡沒抓到");
+          return;
         }
         // The configured maximum is a preference; the instrument has a hard
         // ceiling that is far lower on small caps than on BTC. With margin-based
@@ -1296,7 +1300,9 @@ export async function executeSignal(
 
       case "close": {
         if (!pos) {
-          return; // close signal for a symbol we don't hold - ignore silently
+          await record("close", { symbol: sym, side: signal.side, sizeUsdt: 0, qty: 0, price: null, leverage: 0 },
+            live, true, "沒有這個幣種的持倉（開倉訊號當時可能被擋下或未收到）→ 忽略");
+          return;
         }
         const exitPx = (await fetchPriceSafe(client, sym, pos.entryPrice)) ?? pos.entryPrice;
         const ids = await closeQty(client, live, pos, pos.qty);
@@ -1340,7 +1346,9 @@ export async function executeSignal(
 
       case "update_sl": {
         if (!pos) {
-          return; // SL update for a symbol we don't hold - ignore silently
+          await record("update_sl", { symbol: sym, side: signal.side, sizeUsdt: 0, qty: 0, price: signal.stopLoss, leverage: 0 },
+            live, true, "沒有這個幣種的持倉（開倉訊號當時可能被擋下或未收到）→ 忽略");
+          return;
         }
         const rawSl = signal.stopLossBreakeven ? pos.entryPrice : signal.stopLoss;
         if (rawSl == null) {
@@ -1363,7 +1371,9 @@ export async function executeSignal(
 
       case "update_tp": {
         if (!pos) {
-          return; // TP update for a symbol we don't hold - ignore silently
+          await record("update_tp", { symbol: sym, side: signal.side, sizeUsdt: 0, qty: 0, price: null, leverage: 0 },
+            live, true, "沒有這個幣種的持倉（開倉訊號當時可能被擋下或未收到）→ 忽略");
+          return;
         }
         if (!signal.takeProfits.length) {
           await record("update_tp", { symbol: sym, side: pos.side, sizeUsdt: 0, qty: 0, price: null, leverage: pos.leverage }, live, false, "no take-profit values found in message");
