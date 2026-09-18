@@ -37,6 +37,13 @@ function stepDecimals(step: number): number | null {
  *  fall back to another entry method. */
 export const NO_CONTRACT = "OKX 沒有這個永續合約：";
 
+/** Stop-losses trigger on the MARK price, not the last trade. OKX defaults to
+ *  last, where a single wick print - one trade at a bad price - fires the stop
+ *  and market-closes into the same wick. Mark price is the smoothed index-based
+ *  figure liquidation itself uses and is immune to one-print spikes. Targets
+ *  stay on last: a favourable wick taking profit early is not a harm. */
+const SL_TRIGGER_TYPE = "mark";
+
 /** Codes meaning the ATTACHED TP/SL was invalid while the order itself was
  *  fine: 51076 (TP+SL combined in one entry), 51277-51280 (trigger price on the
  *  wrong side of the mark), 51050-51053 (trigger price on the wrong side of the
@@ -500,6 +507,7 @@ export class OkxClient implements ExchangeClient {
       if (opts.attach.stopLoss != null && opts.attach.stopLoss > 0) {
         attach.push({
           slTriggerPx: opts.attach.stopLoss.toFixed(dec),
+          slTriggerPxType: SL_TRIGGER_TYPE,
           slOrdPx: "-1",                      // close at market on trigger
         });
       }
@@ -621,6 +629,7 @@ export class OkxClient implements ExchangeClient {
         ordType: "oco",
         sz: this.szFromBase(info, Number(opts.size ?? 0)),
         slTriggerPx: opts.stopLoss!.toFixed(dec),
+        slTriggerPxType: SL_TRIGGER_TYPE,
         slOrdPx: "-1",                  // close at market on trigger
         tpTriggerPx: tps[0].price.toFixed(dec),
         tpOrdPx: "-1",
@@ -638,6 +647,7 @@ export class OkxClient implements ExchangeClient {
         ordType: "conditional",
         sz: this.szFromBase(info, Number(opts.size ?? 0)),
         slTriggerPx: opts.stopLoss!.toFixed(dec),
+        slTriggerPxType: SL_TRIGGER_TYPE,
         slOrdPx: "-1",
       });
       if (id) ids.push(id);

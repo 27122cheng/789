@@ -338,7 +338,7 @@ describe("okx take-profit slices close the whole position", () => {
     expect(tps.reduce((a: number, t: any) => a + Number(t.sz), 0)).toBe(307);
     // and the stop is still its own entry, covering everything (no sz)
     expect(attach.filter((a: any) => a.slTriggerPx)).toEqual([
-      { slTriggerPx: "0.1638", slOrdPx: "-1" },
+      { slTriggerPx: "0.1638", slTriggerPxType: "mark", slOrdPx: "-1" },
     ]);
   });
 
@@ -379,5 +379,32 @@ describe("okx take-profit slices close the whole position", () => {
     const tps = captured[0].body.attachAlgoOrds.filter((a: any) => a.tpTriggerPx);
     expect(tps).toHaveLength(1);
     expect(tps[0].sz).toBe("10");       // the whole 10-contract order
+  });
+});
+
+
+describe("stop-loss trigger price source", () => {
+  it("triggers stops on MARK price so a single wick print cannot fire them", async () => {
+    // a long stopped out at 06:43 on one bad print, five minutes before the
+    // provider (on a smoother feed) announced the same trade had reached +0.6R
+    const captured: any[] = [];
+    stubOkx(captured);
+    const c = new OkxClient("k", "s", "p");
+    await c.placeOrder({
+      symbol: "BTC-USDT-SWAP", side: "BUY", type: "MARKET", size: "0.5",
+      attach: { stopLoss: 59000, takeProfits: [{ price: 61000, size: "0.5" }] },
+    });
+    const sl = captured[0].body.attachAlgoOrds.find((a: any) => a.slTriggerPx);
+    const tp = captured[0].body.attachAlgoOrds.find((a: any) => a.tpTriggerPx);
+    expect(sl.slTriggerPxType).toBe("mark");
+    expect(tp.tpTriggerPxType).toBeUndefined();   // targets stay on last
+
+    captured.length = 0;
+    await c.placeStopOrders({
+      symbol: "BTC-USDT-SWAP", side: "SELL", size: "0.5",
+      stopLoss: 59000, takeProfits: [{ price: 61000, size: "0.25" }, { price: 62000, size: "0.25" }],
+    });
+    const algos = captured.filter((x) => x.url.includes("order-algo")).map((x) => x.body);
+    expect(algos.find((b: any) => b.slTriggerPx)?.slTriggerPxType).toBe("mark");
   });
 });
