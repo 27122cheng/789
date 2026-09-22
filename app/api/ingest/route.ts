@@ -85,8 +85,9 @@ export async function POST(req: NextRequest) {
     });
     return NextResponse.json({ ok: true, skipped: "chat_not_allowed" });
   }
+  let outcome;
   try {
-    await handleIncomingMessage(
+    outcome = await handleIncomingMessage(
       text,
       {
         chatId,
@@ -100,6 +101,16 @@ export async function POST(req: NextRequest) {
     await appendWebhookEvent({ ...ev, outcome: "error", detail: `處理失敗：${msg}` });
     return NextResponse.json({ error: msg }, { status: 500 });
   }
-  await appendWebhookEvent(ev);
-  return NextResponse.json({ ok: true });
+  // Say what became of it. "Delivered" alone left a message that was not
+  // recognised as a signal looking exactly like one that never arrived.
+  const detail =
+    outcome.kind === "handled"
+      ? `已解析並處理：${outcome.action} ${outcome.symbol}`
+      : outcome.kind === "duplicate"
+        ? `重複訊息（${outcome.action} ${outcome.symbol}），已處理過，忽略`
+        : outcome.kind === "filtered"
+          ? "命中「忽略關鍵字」，視為雜訊"
+          : "不是交易訊號（沒有進場／止損／止盈或方向），忽略 —— 若它應該是訊號，請貼到解析測試";
+  await appendWebhookEvent({ ...ev, detail: `${ev.detail}；${detail}` });
+  return NextResponse.json({ ok: true, outcome: outcome.kind });
 }

@@ -336,8 +336,12 @@ export interface MonitorRun {
   listener?: {
     authorized: boolean;
     watching: boolean;
-    chats: number;      // how many chats it is watching (0 = all)
-    forwarded: number;  // messages forwarded since the process started
+    connected: boolean;       // MTProto socket actually up right now
+    chats: number;            // how many chats it is watching (0 = all)
+    forwarded: number;        // messages forwarded since the process started
+    lastForwardAt: number;    // unix ms of the last successful forward, 0 = none
+    forwardFailures: number;  // forwards lost even after retries
+    forwardError: string;     // why the last one failed, "" if it did not
   } | null;
 }
 

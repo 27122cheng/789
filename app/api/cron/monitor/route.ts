@@ -42,8 +42,13 @@ export async function GET(req: NextRequest) {
     ? {
         authorized: q.get("authorized") === "1",
         watching: q.get("watching") === "1",
+        // absent on an older listener build: assume up rather than alarm
+        connected: q.has("connected") ? q.get("connected") === "1" : true,
         chats: Number(q.get("chats") ?? "0") || 0,
         forwarded: Number(q.get("forwarded") ?? "0") || 0,
+        lastForwardAt: Number(q.get("lastForwardAt") ?? "0") || 0,
+        forwardFailures: Number(q.get("forwardFailures") ?? "0") || 0,
+        forwardError: (q.get("forwardError") ?? "").slice(0, 160),
       }
     : null;
 

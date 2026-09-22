@@ -73,11 +73,20 @@ state = {
     "monitor_at": "",     # last monitor ping
     "monitor_ok": None,
     "monitor_note": "",
+    "last_forward_at": 0,   # unix ms of the last successful forward
+    "forward_failures": 0,  # forwards that failed even after retries
+    "forward_error": "",    # why the last one failed
 }
 
 
 def make_client(api_id: int, api_hash: str, session_str: str = "") -> TelegramClient:
-    return TelegramClient(StringSession(session_str or SESSION_STRING), api_id, api_hash)
+    # catch_up: after any disconnect (network blip, host restart) ask Telegram
+    # for the updates that happened meanwhile instead of only listening from
+    # now on. Without it every message posted during a gap is simply never
+    # seen - and the gap is invisible, because the reconnect looks healthy.
+    return TelegramClient(
+        StringSession(session_str or SESSION_STRING), api_id, api_hash, catch_up=True
+    )
 
 
 async def save_login_to_cloud(api_id: int, api_hash: str, session_str: str) -> None:
@@ -272,12 +281,47 @@ async def forward_message(text: str, chat_id, message_id, ts_ms,
         "timestamp": int(ts_ms),
     }
     headers = {"x-admin-password": ADMIN_PASSWORD, "Content-Type": "application/json"}
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.post(INGEST_URL, json=payload, headers=headers, timeout=20) as r:
-                await r.read()
-    except Exception as e:  # noqa: BLE001
-        state["error"] = f"轉發失敗：{e}"
+    # A signal is worth more than one attempt. Vercel cold starts, a KV blip
+    # or a dropped connection used to lose the message outright - fire and
+    # forget, no retry, and nothing on the dashboard to say so.
+    last_err = ""
+    for attempt in range(4):
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.post(INGEST_URL, json=payload, headers=headers, timeout=25) as r:
+                    body = await r.text()
+                    if r.status < 500:
+                        # 2xx handled; 4xx is a definite answer (auth, filtered)
+                        # that retrying cannot change
+                        state["last_forward_at"] = int(time.time() * 1000)
+                        state["forward_error"] = "" if r.status < 400 else f"HTTP {r.status} {body[:120]}"
+                        return
+                    last_err = f"HTTP {r.status} {body[:120]}"
+        except Exception as e:  # noqa: BLE001
+            last_err = str(e)[:160]
+        await asyncio.sleep(2 * (attempt + 1))
+    state["forward_failures"] += 1
+    state["forward_error"] = f"轉發失敗（已重試 4 次）：{last_err}"
+    state["error"] = state["forward_error"]
+
+
+async def keepalive_loop():
+    """Render's free tier spins a web service down after ~15 minutes without
+    an INBOUND request - our own outbound pings do not count - and a spun-down
+    process holds no Telegram connection, so everything posted meanwhile is
+    missed. Render sets RENDER_EXTERNAL_URL; requesting ourselves through it
+    every few minutes keeps the instance awake. KEEPALIVE_URL overrides."""
+    url = (os.getenv("KEEPALIVE_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").strip()
+    if not url:
+        return
+    while True:
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.get(url, timeout=20) as r:
+                    await r.read()
+        except Exception:  # noqa: BLE001
+            pass
+        await asyncio.sleep(5 * 60)
 
 
 async def start_watching(client: TelegramClient):
@@ -355,12 +399,18 @@ async def monitor_loop():
             # report our own health on the call we already make each minute, so
             # the website can distinguish "logged in and watching" from
             # "process alive but logged out" - the silent cause of no signals
+            client = state.get("client")
+            connected = bool(client and client.is_connected())
             params = {
                 "listener": "1",
                 "authorized": "1" if state.get("authorized") else "0",
                 "watching": "1" if state.get("watching") else "0",
+                "connected": "1" if connected else "0",
                 "chats": str(len(WATCH_CHATS)),
                 "forwarded": str(state.get("forwarded", 0)),
+                "lastForwardAt": str(state.get("last_forward_at", 0)),
+                "forwardFailures": str(state.get("forward_failures", 0)),
+                "forwardError": (state.get("forward_error") or "")[:160],
             }
             async with aiohttp.ClientSession() as s:
                 async with s.get(MONITOR_URL, headers=headers, params=params, timeout=50) as r:
@@ -388,6 +438,7 @@ async def main():
     print(f"listener web UI on http://0.0.0.0:{PORT}")
     await try_resume_session()
     asyncio.create_task(monitor_loop())
+    asyncio.create_task(keepalive_loop())
     print(f"monitor ping every {MONITOR_SECONDS}s -> {MONITOR_URL}")
     await asyncio.Event().wait()  # run forever
 

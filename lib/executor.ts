@@ -27,7 +27,7 @@ import {
   setStopSnapshot,
   setUntrackedSnapshot,
 } from "./store";
-import { OrderRecord, ParsedSignal, Position, Settings } from "./types";
+import { OrderRecord, ParsedSignal, Position, Settings, SignalAction } from "./types";
 
 /** Raised when the venue's minimum order size exceeds the configured position
  *  size and the user chose to skip rather than trade bigger than intended. */
@@ -742,14 +742,23 @@ async function closeQty(
 }
 
 // ------------------------------------------------------------ main handler
+/** What became of a delivered message. Returned so the delivery log can say
+ *  it: a message that arrives but is not a signal used to be indistinguishable
+ *  from one that never arrived. */
+export type IngestOutcome =
+  | { kind: "filtered" }
+  | { kind: "not_signal" }
+  | { kind: "duplicate"; action: SignalAction; symbol: string }
+  | { kind: "handled"; action: SignalAction; symbol: string };
+
 export async function handleIncomingMessage(
   text: string,
   meta: { chatId: string; messageId: number; timestamp: number },
   settings: Settings
-): Promise<void> {
+): Promise<IngestOutcome> {
   // 1. noise filter (news, data releases, ads ...) - dropped silently, no record
   if (isFiltered(text, settings.filters.ignoreKeywords)) {
-    return;
+    return { kind: "filtered" };
   }
 
   // 2. parse
@@ -760,17 +769,19 @@ export async function handleIncomingMessage(
   });
   if (!signal) {
     // not a trade signal (chatter / analysis) - dropped silently, no record
-    return;
+    return { kind: "not_signal" };
   }
 
   // 3. dedup (covers Telegram redeliveries; edits get a new content digest)
-  if (await checkAndMarkSeen(dedupKey(signal))) return;
+  if (await checkAndMarkSeen(dedupKey(signal))) {
+    return { kind: "duplicate", action: signal.action, symbol: signal.symbol };
+  }
 
   // cancels run silently in the background: no signal/order records, and the
   // cancelled trade's earlier records are purged from the logs
   if (signal.action === "cancel") {
     await executeSignal(signal, settings);
-    return;
+    return { kind: "handled", action: signal.action, symbol: signal.symbol };
   }
 
   await appendSignal({
@@ -786,6 +797,7 @@ export async function handleIncomingMessage(
   });
 
   await executeSignal(signal, settings);
+  return { kind: "handled", action: signal.action, symbol: signal.symbol };
 }
 
 export async function executeSignal(

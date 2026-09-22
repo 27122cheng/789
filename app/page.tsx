@@ -241,15 +241,39 @@ export default function Dashboard() {
             </div>
           );
         }
-        if (!stale && !run.error) {
+        // Logged in but the Telegram socket is down: the process is alive
+        // (it is still pinging us) yet hears nothing - exactly the "shows
+        // normal, misses signals" case.
+        if (!stale && lis && lis.authorized && lis.connected === false) {
           return (
-            <p className="hint">
-              ✅ 監控正常運作 — 最後執行 {Math.round((ageMs ?? 0) / 1000)} 秒前
-              {run.actionCount ? `（${run.actionCount} 個動作）` : ""}
-              {lis
-                ? `｜監聽器：已登入、監聽 ${lis.chats || "全部"} 個群組、已轉發 ${lis.forwarded} 則`
-                : ""}
-            </p>
+            <div className="banner live" style={{ marginBottom: 14 }}>
+              ⚠️ 監聽器已登入，但<b>與 Telegram 的連線目前斷開</b>，這段期間的訊息收不到。
+              它會自動重連並補抓斷線期間的訊息；若持續出現，請到 Render 重啟監聽器。
+            </div>
+          );
+        }
+        if (!stale && !run.error) {
+          const fwdAge = lis?.lastForwardAt
+            ? Math.round((Date.now() - lis.lastForwardAt) / 60000)
+            : null;
+          return (
+            <>
+              <p className="hint">
+                ✅ 監控正常運作 — 最後執行 {Math.round((ageMs ?? 0) / 1000)} 秒前
+                {run.actionCount ? `（${run.actionCount} 個動作）` : ""}
+                {lis
+                  ? `｜監聽器：已登入、連線中、監聽 ${lis.chats || "全部"} 個群組、` +
+                    `已轉發 ${lis.forwarded} 則` +
+                    (fwdAge != null ? `（最後一則 ${fwdAge} 分鐘前）` : "（本次啟動後尚未轉發）")
+                  : ""}
+              </p>
+              {lis?.forwardFailures ? (
+                <div className="banner live" style={{ marginBottom: 14 }}>
+                  ⚠️ 監聽器有 {lis.forwardFailures} 則訊息<b>轉發失敗</b>（重試 4 次仍失敗，訊號已遺失）
+                  {lis.forwardError ? `：${lis.forwardError}` : ""}
+                </div>
+              ) : null}
+            </>
           );
         }
         return (
