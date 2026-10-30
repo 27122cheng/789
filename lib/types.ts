@@ -278,6 +278,13 @@ export interface Settings {
       // position removed, freeing the symbol for a new signal. 0 = wait
       // indefinitely (the order then only ever goes away by filling or by hand).
       entryTimeoutHours: number;
+      // Refuse a MARKET fill when the live price has drifted this far (%) from
+      // the signal's entry. A signal reaches us seconds to minutes after it was
+      // written; by then the price can have run - chasing it means a worse fill
+      // than the provider got, with the same stop and therefore more risk than
+      // the plan carried. Resting limit orders are exempt: they wait at the
+      // entry price regardless. 0 = off.
+      maxEntryDeviationPercent: number;
       attachStopLoss: boolean;
       attachTakeProfit: boolean;
       // 分批止盈: close an equal share of the position at each TP target
@@ -370,6 +377,7 @@ export const DEFAULT_SETTINGS: Settings = {
       limitRejected: "skip",
       entryDelaySeconds: 0,
       entryTimeoutHours: 6,
+      maxEntryDeviationPercent: 0.5,
       attachStopLoss: true,
       attachTakeProfit: true,
       splitTakeProfit: true,

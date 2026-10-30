@@ -46,6 +46,7 @@ export default function SettingsPage() {
   const [limitRejected, setLimitRejected] = useState("skip");
   const [entryDelay, setEntryDelay] = useState(0);
   const [entryTimeout, setEntryTimeout] = useState(6);
+  const [maxDrift, setMaxDrift] = useState(0.5);
   const [exchangeStops, setExchangeStops] = useState(true);
   const [attachSl, setAttachSl] = useState(true);
   const [attachTp, setAttachTp] = useState(true);
@@ -106,6 +107,7 @@ export default function SettingsPage() {
     setLimitRejected(s.trading.orders.limitRejected ?? "skip");
     setEntryDelay(s.trading.orders.entryDelaySeconds ?? 0);
     setEntryTimeout(s.trading.orders.entryTimeoutHours ?? 6);
+    setMaxDrift(s.trading.orders.maxEntryDeviationPercent ?? 0.5);
     setExchangeStops(s.trading.orders.exchangeStops !== false);
     setAttachSl(!!s.trading.orders.attachStopLoss);
     setAttachTp(!!s.trading.orders.attachTakeProfit);
@@ -178,6 +180,7 @@ export default function SettingsPage() {
             limitRejected,
             entryDelaySeconds: Number(entryDelay),
             entryTimeoutHours: Number(entryTimeout),
+            maxEntryDeviationPercent: Number(maxDrift),
             exchangeStops,
             attachStopLoss: attachSl,
             attachTakeProfit: attachTp,
@@ -470,6 +473,17 @@ export default function SettingsPage() {
               紀錄會留一筆說明，不會無聲消失；若撤單失敗會保留追蹤、下一分鐘再試，
               以免留下一張沒人管理的單。
               填 <b>0</b> = 永不刪除，掛單只會靠成交或你自己撤掉才消失 —— 它會一直佔著一個持倉名額。
+            </p>
+            <label style={{ marginTop: 12 }}>現價偏離進場價超過幾 % 就不進場</label>
+            <input type="number" min={0} step={0.1} value={maxDrift}
+                   onChange={(e) => setMaxDrift(Number(e.target.value))} />
+            <p className="hint">
+              要<b>用市價進場</b>的那一刻，先抓交易所現價跟訊號的進場價比對，偏離超過這個百分比就
+              <b>放棄這筆、不追價</b>（預設 <b>0.5%</b>，0 = 關閉）。
+              訊號傳到這裡有延遲，價格常常已經跑掉；追進去等於用比提供方更差的價格扛一樣的止損。
+              快進快出的止損距離大約 0.6～0.9%，所以 0.5% 的偏離已經吃掉大半個 R。
+              往哪個方向偏都算 —— 價格「超前」穿過進場價多半代表那個設定已經走完了，不是撿便宜。
+              限價掛單不受影響（它本來就掛在進場價等）。「延後掛單」時間到的那一刻也會用當下價格再檢查一次。
             </p>
             <label style={{ marginTop: 12 }}>掛限價單被交易所拒絕時</label>
             <select value={limitRejected} onChange={(e) => setLimitRejected(e.target.value)}>

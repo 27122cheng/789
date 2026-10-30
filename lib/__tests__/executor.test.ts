@@ -25,6 +25,9 @@ function settings(): Settings {
   const s = structuredClone(DEFAULT_SETTINGS) as Settings;
   s.telegram.allowedChats = ["-100123"];
   s.trading.liveTrading = false;
+  // most cases here put the live price deliberately far from the entry to
+  // exercise other mechanisms; the drift guard has its own suite
+  s.trading.orders.maxEntryDeviationPercent = 0;
   // these cases stub Pionex-shaped responses; the OKX path is covered
   // separately below and in okx.test.ts
   s.exchange = "pionex";
@@ -2943,5 +2946,128 @@ describe("a target the market already ran past", () => {
     const pos = (await getPositions())["ONDOUSDT"];
     expect(pos).toBeDefined();
     expect(pos.qty).toBeGreaterThan(0);
+  });
+});
+
+describe("entry drift guard", () => {
+  beforeEach(() => savePositions({}));
+
+  function cfg(limitPct: number): Settings {
+    const c = settings();
+    c.exchange = "okx";
+    c.okx = {
+      apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false,
+    };
+    c.trading.liveTrading = true;
+    c.trading.risk.cooldownSeconds = 0;
+    c.trading.risk.maxOpenPositions = 20;
+    c.trading.orders.entryType = "market";
+    c.trading.orders.maxEntryDeviationPercent = limitPct;
+    return c;
+  }
+
+  function stub(orders: any[], price: string) {
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any[] = [];
+      if (url.includes("/public/instruments")) {
+        data = [{ instId: "ONDO-USDT-SWAP", ctVal: "10", lotSz: "1", minSz: "1", tickSz: "0.0001", lever: "50" }];
+      } else if (url.includes("/market/ticker")) data = [{ last: price }];
+      else if (url.includes("/account/set-leverage")) data = [{ lever: "20" }];
+      else if (url.includes("/account/positions")) data = [];
+      else if (url.includes("algo") || url.includes("orders-pending")) data = [];
+      else if (url.includes("/trade/order")) {
+        orders.push(body);
+        data = [{ ordId: `OID-${orders.length}`, sCode: "0" }];
+      }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+  }
+
+  const SIGNAL = "ONDOUSDT SHORT Entry: 0.3381 SL: 0.340354 TP1: 0.334719";
+
+  it("refuses a market fill when the price has run away from the entry", async () => {
+    // entry 0.3381, live 0.3345: 1.06% away - more than a whole R on a scalp.
+    // Chasing it is the provider's stop with a worse price.
+    const orders: any[] = [];
+    stub(orders, "0.3345");
+    await handleIncomingMessage(SIGNAL, meta(), cfg(0.5));
+    expect(orders).toHaveLength(0);
+    expect((await getPositions())["ONDOUSDT"]).toBeUndefined();
+    const rec = (await getOrders()).find((o) => o.symbol === "ONDOUSDT");
+    expect(rec?.success).toBe(false);
+    expect(rec?.message).toMatch(/偏離進場價 0\.3381 達 1\.06%/);
+    expect(rec?.message).toMatch(/超過上限 0\.5%/);
+  });
+
+  it("fills when the drift is within the limit", async () => {
+    const orders: any[] = [];
+    stub(orders, "0.3375");   // 0.18% off
+    await handleIncomingMessage(SIGNAL, meta(), cfg(0.5));
+    expect(orders).toHaveLength(1);
+    expect(orders[0].ordType).toBe("market");
+  });
+
+  it("counts drift in the favourable direction too", async () => {
+    // a short whose price is already 1% ABOVE entry is not a bargain; the
+    // setup the stop was planned around has moved
+    const orders: any[] = [];
+    stub(orders, "0.3416");
+    await handleIncomingMessage(SIGNAL, meta(), cfg(0.5));
+    expect(orders).toHaveLength(0);
+  });
+
+  it("is off at 0 and leaves resting limit orders alone", async () => {
+    const orders: any[] = [];
+    stub(orders, "0.3345");
+    await handleIncomingMessage(SIGNAL, meta(), cfg(0));
+    expect(orders).toHaveLength(1);
+
+    // a limit entry waits at the entry price regardless of where price is now
+    orders.length = 0;
+    await savePositions({});
+    const c = cfg(0.5);
+    c.trading.orders.entryType = "limit";
+    stub(orders, "0.3500");  // far above a short entry - the limit just rests
+    await handleIncomingMessage(SIGNAL, meta(), c);
+    expect(orders).toHaveLength(1);
+    expect(orders[0].ordType).toBe("limit");
+  });
+
+  it("re-checks at the end of a deferred entry, where the market had time to move", async () => {
+    let price = "0.3381";
+    const orders: any[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any[] = [];
+      if (url.includes("/public/instruments")) {
+        data = [{ instId: "ONDO-USDT-SWAP", ctVal: "10", lotSz: "1", minSz: "1", tickSz: "0.0001", lever: "50" }];
+      } else if (url.includes("/market/ticker")) data = [{ last: price }];
+      else if (url.includes("/account/set-leverage")) data = [{ lever: "20" }];
+      else if (url.includes("/account/positions")) data = [];
+      else if (url.includes("algo") || url.includes("orders-pending")) data = [];
+      else if (url.includes("/trade/order")) {
+        orders.push(body);
+        data = [{ ordId: `OID-${orders.length}`, sCode: "0" }];
+      }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+    const c = cfg(0.5);
+    c.trading.orders.entryType = "limit";
+    c.trading.orders.entryDelaySeconds = 120;
+    await handleIncomingMessage(SIGNAL, meta(), c);
+    const positions = await getPositions();
+    expect(positions["ONDOUSDT"].pendingEntry!.mode).toBe("scheduled");
+
+    // during the wait the short's entry was blown through by 1.5%
+    price = "0.3330";
+    positions["ONDOUSDT"].pendingEntry!.placeAt = Date.now() - 1000;
+    await savePositions(positions);
+    await monitorTick(c);
+    expect(orders).toHaveLength(0);
+    expect((await getPositions())["ONDOUSDT"]).toBeUndefined();
+    const rec = (await getOrders()).find((o) => o.symbol === "ONDOUSDT" && !o.success);
+    expect(rec?.message).toMatch(/延後時間到，但現價/);
   });
 });

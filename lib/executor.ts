@@ -171,6 +171,25 @@ function isPermissionDenied(msg: string): boolean {
   );
 }
 
+/** Why a market fill at `price` should NOT happen for a signal that wanted
+ *  `entry`, or null when it may. Absolute drift in either direction counts: a
+ *  price past the entry in the favourable direction is just as likely to mean
+ *  the setup already played out as to mean a bargain. */
+function entryDriftReject(
+  settings: Settings,
+  entry: number | null,
+  price: number | null
+): string | null {
+  const limit = settings.trading.orders.maxEntryDeviationPercent ?? 0;
+  if (!(limit > 0) || entry == null || price == null || entry <= 0) return null;
+  const driftPct = (Math.abs(price - entry) / entry) * 100;
+  if (driftPct <= limit) return null;
+  return (
+    `現價 ${price} 偏離進場價 ${entry} 達 ${driftPct.toFixed(2)}%，超過上限 ${limit}%，` +
+    `未進場（訊號延遲或行情已走遠；可在設定調整「現價偏離進場價上限」）`
+  );
+}
+
 /** True when nothing this app can do will make the order work: the account is
  *  rejected, has no money, or the coin has no contract at all.
  *
@@ -1117,7 +1136,15 @@ export async function executeSignal(
           }
         }
 
-        // otherwise fill now at market
+        // otherwise fill now at market - unless the price has already left the
+        // entry behind, in which case the plan's risk no longer applies
+        const drift = entryDriftReject(settings, aligned.entry, refPrice);
+        if (drift) {
+          await record("open",
+            { symbol: sym, side: signal.side, sizeUsdt, qty: 0, price: aligned.entry, leverage },
+            live, false, drift);
+          return;
+        }
         const plannedEntry = refPrice ?? aligned.entry ?? 0;
         const plannedQty = plannedEntry > 0 ? sizeUsdt / plannedEntry : 0;
         const tpPlan = await alignPlan(
@@ -1501,7 +1528,16 @@ async function placeDeferredEntry(
     }
   }
 
-  // price already at or through the level: enter now at market
+  // price already at or through the level: enter now at market - the delay
+  // existed so the market could move, so this is where drift matters most
+  const drift = entryDriftReject(settings, target, price);
+  if (drift) {
+    pos.pendingEntry = null; // caller drops the position
+    await record("open",
+      { symbol: sym, side: pos.side, sizeUsdt: pos.sizeUsdt, qty: 0, price: target, leverage: pos.leverage },
+      isLiveOrder, false, `延後時間到，但${drift}`);
+    return `延後時間到但現價已偏離進場價 → 略過`;
+  }
   try {
     const r = await placeEntry(
       client, isLiveOrder, sym, pos.side, pos.sizeUsdt, "market", null, price,
