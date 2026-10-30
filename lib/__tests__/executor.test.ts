@@ -3001,6 +3001,33 @@ describe("entry drift guard", () => {
     expect(rec?.message).toMatch(/超過上限 0\.5%/);
   });
 
+  it("does not fill blind: an unreadable ticker is a refusal, not zero drift", async () => {
+    // the fallback price equals the entry, which would read as 0% drift and
+    // wave the fill through precisely when nothing is known about the market
+    const orders: any[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any[] = [];
+      if (url.includes("/public/instruments")) {
+        data = [{ instId: "ONDO-USDT-SWAP", ctVal: "10", lotSz: "1", minSz: "1", tickSz: "0.0001", lever: "50" }];
+      } else if (url.includes("/market/ticker")) {
+        return { ok: true, status: 200, json: async () => ({ code: "50011", msg: "rate limit", data: [] }) };
+      } else if (url.includes("/account/set-leverage")) data = [{ lever: "20" }];
+      else if (url.includes("/account/positions")) data = [];
+      else if (url.includes("algo") || url.includes("orders-pending")) data = [];
+      else if (url.includes("/trade/order")) {
+        orders.push(body);
+        data = [{ ordId: "OID-1", sCode: "0" }];
+      }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+    await handleIncomingMessage(SIGNAL, meta(), cfg(0.5));
+    expect(orders).toHaveLength(0);
+    const rec = (await getOrders()).find((o) => o.symbol === "ONDOUSDT");
+    expect(rec?.success).toBe(false);
+    expect(rec?.message).toMatch(/抓不到交易所現價/);
+  });
+
   it("fills when the drift is within the limit", async () => {
     const orders: any[] = [];
     stub(orders, "0.3375");   // 0.18% off

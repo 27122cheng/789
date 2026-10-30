@@ -178,10 +178,19 @@ function isPermissionDenied(msg: string): boolean {
 function entryDriftReject(
   settings: Settings,
   entry: number | null,
+  // the LIVE price, or null when the ticker could not be read. Not the
+  // fallback-to-entry figure: that reads as zero drift and waves the fill
+  // through at exactly the moment nothing is known about where the market is.
   price: number | null
 ): string | null {
   const limit = settings.trading.orders.maxEntryDeviationPercent ?? 0;
-  if (!(limit > 0) || entry == null || price == null || entry <= 0) return null;
+  if (!(limit > 0) || entry == null || entry <= 0) return null;
+  if (price == null) {
+    return (
+      `抓不到交易所現價，無法確認是否偏離進場價 ${entry}，未進場` +
+      `（偏離上限 ${limit}% 已啟用；要在抓不到價時仍進場，請把上限設為 0）`
+    );
+  }
   const driftPct = (Math.abs(price - entry) / entry) * 100;
   if (driftPct <= limit) return null;
   return (
@@ -906,7 +915,11 @@ export async function executeSignal(
           stopLoss: signal.stopLoss,
           takeProfits: signal.takeProfits,
         });
-        const refPrice = await fetchPriceSafe(client, sym, aligned.entry);
+        // livePrice is null when the ticker fails; refPrice then falls back to
+        // the entry for sizing and direction, but the drift guard must see the
+        // honest null rather than a price that happens to equal the entry.
+        const livePrice = await fetchPriceSafe(client, sym, null);
+        const refPrice = livePrice ?? aligned.entry;
         const entryType = settings.trading.orders.entryType;
         const maxAdds = settings.trading.risk.maxAddsPerPosition;
         const slForRisk = settings.trading.orders.attachStopLoss ? aligned.stopLoss : null;
@@ -1138,7 +1151,7 @@ export async function executeSignal(
 
         // otherwise fill now at market - unless the price has already left the
         // entry behind, in which case the plan's risk no longer applies
-        const drift = entryDriftReject(settings, aligned.entry, refPrice);
+        const drift = entryDriftReject(settings, aligned.entry, livePrice);
         if (drift) {
           await record("open",
             { symbol: sym, side: signal.side, sizeUsdt, qty: 0, price: aligned.entry, leverage },
