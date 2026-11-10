@@ -271,15 +271,21 @@ function permHint(settings: Settings): string {
  *  entry & stop-loss round UP (無條件進位), take-profits round DOWN (無條件縮減).
  *  If the precision can't be determined, values are left unchanged. */
 /**
- * Snap a protective level to the venue's tick in the direction that never makes
- * the trade riskier than the signal: the stop moves AWAY from the entry, the
- * target moves TOWARD it. Both come out the same way per side - a long's stop
- * is below entry and its target above, so both round DOWN; a short's are the
- * mirror, so both round UP. The old "stops up, targets down" rule was right
- * for shorts only: on a long it tightened the stop and pushed the target off.
+ * Snap a protective level to the venue's tick AWAY from the entry, on both
+ * sides of the trade: the stop never gets tighter than the signal asked, and
+ * the target never gets smaller. On a long the stop is below entry (round
+ * down) and the target above (round up); a short is the mirror. The one
+ * rule that is side-blind - "stops up, targets down" - tightened every long's
+ * stop by a tick.
  */
-function snapLevel(v: number, dec: number, side: "long" | "short"): number {
-  return side === "long" ? floorToDecimals(v, dec) : ceilToDecimals(v, dec);
+function snapLevel(
+  v: number,
+  dec: number,
+  side: "long" | "short",
+  kind: "sl" | "tp"
+): number {
+  const down = side === "long" ? kind === "sl" : kind === "tp";
+  return down ? floorToDecimals(v, dec) : ceilToDecimals(v, dec);
 }
 
 async function alignPrices(
@@ -291,15 +297,18 @@ async function alignPrices(
   const dec = await client.pricePrecision(symbol);
   const up = (v: number | null | undefined) =>
     v == null ? null : dec == null ? v : ceilToDecimals(v, dec);
-  // without a side there is no "away" or "toward"; fall back to the old rule
-  const level = (v: number) =>
-    dec == null ? v : side ? snapLevel(v, dec, side) : v;
+  // without a side there is no "away from entry"; fall back to the old rule
   return {
     entry: up(p.entry),
     stopLoss:
-      p.stopLoss == null ? null : side ? level(p.stopLoss) : up(p.stopLoss),
+      p.stopLoss == null ? null
+      : dec == null ? p.stopLoss
+      : side ? snapLevel(p.stopLoss, dec, side, "sl")
+      : up(p.stopLoss),
     takeProfits: (p.takeProfits ?? []).map((t) =>
-      side ? level(t) : dec == null ? t : floorToDecimals(t, dec)
+      dec == null ? t
+      : side ? snapLevel(t, dec, side, "tp")
+      : floorToDecimals(t, dec)
     ),
   };
 }
@@ -716,9 +725,9 @@ async function alignPlan(
 ): Promise<{ price: number; size: string }[]> {
   if (!plan.length) return [];
   const dec = await client.pricePrecision(symbol);
-  // targets snap TOWARD the entry (see snapLevel), never away from it
+  // targets snap AWAY from the entry (see snapLevel): never a smaller target
   return plan.map((p) => ({
-    price: dec == null ? p.price : snapLevel(p.price, dec, side),
+    price: dec == null ? p.price : snapLevel(p.price, dec, side, "tp"),
     size: String(p.size),
   }));
 }
@@ -929,8 +938,8 @@ export async function executeSignal(
           }
         }
         const sizeUsdt = await computeSizeUsdt(settings, signal, client, live, false, leverage);
-        // snap to the venue's tick: entry up; stop away from entry, targets
-        // toward it (side-dependent, see snapLevel)
+        // snap to the venue's tick: entry up; stop and targets both AWAY from
+        // the entry (side-dependent, see snapLevel)
         const aligned = await alignPrices(client, sym, {
           entry: signal.entryPrice,
           stopLoss: signal.stopLoss,
@@ -1456,7 +1465,7 @@ export async function executeSignal(
           await record("update_tp", { symbol: sym, side: pos.side, sizeUsdt: 0, qty: 0, price: null, leverage: pos.leverage }, live, false, "no take-profit values found in message");
           return;
         }
-        // targets snap TOWARD the entry, so they are never harder to reach than asked
+        // targets snap AWAY from the entry, so they are never smaller than asked
         const alignedTps = (await alignPrices(client, sym, { takeProfits: signal.takeProfits }, pos.side)).takeProfits;
         pos.takeProfits = [...alignedTps].sort((a, b) =>
           pos.side === "long" ? a - b : b - a);
