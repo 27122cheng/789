@@ -3098,3 +3098,90 @@ describe("entry drift guard", () => {
     expect(rec?.message).toMatch(/延後時間到，但現價/);
   });
 });
+
+describe("tick alignment never makes the trade riskier than the signal", () => {
+  beforeEach(() => savePositions({}));
+
+  // IOST-style instrument: price tick 0.000001 so a 7-decimal signal price
+  // must snap one way or the other
+  function stub(orders: any[], price: string) {
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      let data: any[] = [];
+      if (url.includes("/public/instruments")) {
+        data = [{ instId: "IOST-USDT-SWAP", ctVal: "1", lotSz: "1", minSz: "1", tickSz: "0.000001", lever: "20" }];
+      } else if (url.includes("/market/ticker")) data = [{ last: price }];
+      else if (url.includes("/account/set-leverage")) data = [{ lever: "20" }];
+      else if (url.includes("/account/positions")) data = [];
+      else if (url.includes("algo") || url.includes("orders-pending")) data = [];
+      else if (url.includes("/trade/order")) {
+        orders.push(body);
+        data = [{ ordId: `OID-${orders.length}`, sCode: "0" }];
+      }
+      return { ok: true, status: 200, json: async () => ({ code: "0", data }) };
+    }));
+  }
+
+  function cfg(): Settings {
+    const c = settings();
+    c.exchange = "okx";
+    c.okx = {
+      apiKey: "k", apiSecret: "s", passphrase: "p",
+      baseUrl: "https://www.okx.com", tdMode: "cross", demo: false,
+    };
+    c.trading.liveTrading = true;
+    c.trading.risk.cooldownSeconds = 0;
+    c.trading.risk.maxOpenPositions = 20;
+    c.trading.orders.entryType = "market";
+    c.trading.orders.rTakeProfit.enabled = false; // the signal's own targets
+    return c;
+  }
+
+  it("LONG: stop rounds DOWN (further below), targets round DOWN (closer)", async () => {
+    // the old rule rounded the stop UP - which on a long TIGHTENS it
+    const orders: any[] = [];
+    stub(orders, "0.0050000");
+    await handleIncomingMessage(
+      "IOSTUSDT LONG Entry: 0.0050000 SL: 0.0048005 TP1: 0.0052004 TP2: 0.0054009",
+      meta(), cfg()
+    );
+    const pos = (await getPositions())["IOSTUSDT"];
+    expect(pos.stopLoss).toBeCloseTo(0.004800, 9);              // not 0.004801
+    expect(pos.takeProfits).toEqual([0.0052, 0.0054]);         // not 0.005201 / 0.005401
+    const sl = orders[0].attachAlgoOrds.find((a: any) => a.slTriggerPx);
+    const tps = orders[0].attachAlgoOrds.filter((a: any) => a.tpTriggerPx);
+    expect(sl.slTriggerPx).toBe("0.004800");
+    // with R-splitting off the entry carries only the FINAL target (the split
+    // is laid as separate orders later); what matters here is its rounding
+    expect(tps.map((t: any) => t.tpTriggerPx)).toEqual(["0.005400"]);
+  });
+
+  it("SHORT: stop rounds UP (further above), targets round UP (closer)", async () => {
+    // the old rule rounded targets DOWN - which on a short pushes them AWAY
+    const orders: any[] = [];
+    stub(orders, "0.0050000");
+    await handleIncomingMessage(
+      "IOSTUSDT SHORT Entry: 0.0050000 SL: 0.0051991 TP1: 0.0048001 TP2: 0.0046001",
+      meta(), cfg()
+    );
+    const pos = (await getPositions())["IOSTUSDT"];
+    expect(pos.stopLoss).toBeCloseTo(0.005200, 9);              // not 0.005199
+    expect(pos.takeProfits).toEqual([0.004801, 0.004601]);     // not 0.004800 / 0.004600
+    const sl = orders[0].attachAlgoOrds.find((a: any) => a.slTriggerPx);
+    const tps = orders[0].attachAlgoOrds.filter((a: any) => a.tpTriggerPx);
+    expect(sl.slTriggerPx).toBe("0.005200");
+    expect(tps.map((t: any) => t.tpTriggerPx)).toEqual(["0.004601"]);
+  });
+
+  it("a stop move on a long also snaps away, never tighter", async () => {
+    const orders: any[] = [];
+    stub(orders, "0.0050000");
+    await handleIncomingMessage(
+      "IOSTUSDT LONG Entry: 0.0050000 SL: 0.0048000 TP1: 0.0054000", meta(), cfg()
+    );
+    await handleIncomingMessage(
+      "IOSTUSDT 移動止損 新止損： 0.0049005", meta(), cfg()
+    );
+    expect((await getPositions())["IOSTUSDT"].stopLoss).toBeCloseTo(0.004900, 9);
+  });
+});
