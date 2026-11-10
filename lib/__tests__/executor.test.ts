@@ -3099,7 +3099,7 @@ describe("entry drift guard", () => {
   });
 });
 
-describe("tick alignment: stop and targets both snap away from the entry", () => {
+describe("tick alignment: stop snaps away from entry, targets toward it", () => {
   beforeEach(() => savePositions({}));
 
   // IOST-style instrument: price tick 0.000001 so a 7-decimal signal price
@@ -3137,7 +3137,7 @@ describe("tick alignment: stop and targets both snap away from the entry", () =>
     return c;
   }
 
-  it("LONG: stop rounds DOWN (further below), targets round UP (further above)", async () => {
+  it("LONG: stop rounds DOWN (further below), targets round DOWN (closer)", async () => {
     // the old rule rounded the stop UP - which on a long TIGHTENS it
     const orders: any[] = [];
     stub(orders, "0.0050000");
@@ -3147,16 +3147,16 @@ describe("tick alignment: stop and targets both snap away from the entry", () =>
     );
     const pos = (await getPositions())["IOSTUSDT"];
     expect(pos.stopLoss).toBeCloseTo(0.004800, 9);              // not 0.004801
-    expect(pos.takeProfits).toEqual([0.005201, 0.005401]);     // not 0.0052 / 0.0054
+    expect(pos.takeProfits).toEqual([0.0052, 0.0054]);         // not 0.005201 / 0.005401
     const sl = orders[0].attachAlgoOrds.find((a: any) => a.slTriggerPx);
     const tps = orders[0].attachAlgoOrds.filter((a: any) => a.tpTriggerPx);
     expect(sl.slTriggerPx).toBe("0.004800");
     // with R-splitting off the entry carries only the FINAL target (the split
     // is laid as separate orders later); what matters here is its rounding
-    expect(tps.map((t: any) => t.tpTriggerPx)).toEqual(["0.005401"]);
+    expect(tps.map((t: any) => t.tpTriggerPx)).toEqual(["0.005400"]);
   });
 
-  it("SHORT: stop rounds UP (further above), targets round DOWN (further below)", async () => {
+  it("SHORT: stop rounds UP (further above), targets round UP (closer)", async () => {
     // the mirror of the long rule
     const orders: any[] = [];
     stub(orders, "0.0050000");
@@ -3166,11 +3166,11 @@ describe("tick alignment: stop and targets both snap away from the entry", () =>
     );
     const pos = (await getPositions())["IOSTUSDT"];
     expect(pos.stopLoss).toBeCloseTo(0.005200, 9);              // not 0.005199
-    expect(pos.takeProfits).toEqual([0.0048, 0.0046]);         // not 0.004801 / 0.004601
+    expect(pos.takeProfits).toEqual([0.004801, 0.004601]);     // not 0.0048 / 0.0046
     const sl = orders[0].attachAlgoOrds.find((a: any) => a.slTriggerPx);
     const tps = orders[0].attachAlgoOrds.filter((a: any) => a.tpTriggerPx);
     expect(sl.slTriggerPx).toBe("0.005200");
-    expect(tps.map((t: any) => t.tpTriggerPx)).toEqual(["0.004600"]);
+    expect(tps.map((t: any) => t.tpTriggerPx)).toEqual(["0.004601"]);
   });
 
   it("a stop move on a long also snaps away, never tighter", async () => {
